@@ -17,4 +17,4 @@ jobs:
   release:
     permissions:
       contents: write
-    uses: spelaion-dev/spelaiondb-plugin-template/.github/workflows/plugin-release.yml@f9ac807de59b6c7b4eb970781a9ce098e809d42f
+    uses: spelaion-dev/spelaiondb-plugin-template/.github/workflows/plugin-release.yml@9714b4536df6674c2c9f3800a906aa8c7353eab3
