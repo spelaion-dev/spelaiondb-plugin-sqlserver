@@ -1,0 +1,25 @@
+# What every pull request and every push to `main` must pass: the checks every plugin of
+# SpelaionDB shares, kept in the template's repository and called by commit. A change there
+# reaches this plugin when this file moves the commit.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    uses: spelaion-dev/spelaiondb-plugin-template/.github/workflows/plugin-ci.yml@f9ac807de59b6c7b4eb970781a9ce098e809d42f
+    with:
+      # Where ci/services.sh put the server. On Windows there is none: the tests that need it
+      # are skipped there, saying so.
+      test-env: |
+        SPELAION_TEST_MSSQL=127.0.0.1:11433

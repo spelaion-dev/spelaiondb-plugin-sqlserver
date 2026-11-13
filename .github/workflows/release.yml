@@ -1,0 +1,20 @@
+# A release: pushing a tag `vX.Y.Z` builds the program for the four platforms SpelaionDB
+# ships on and publishes each archive with its SHA-256 (SpelaionDB's ADR-042, point 6), through
+# the release every plugin shares, kept in the template's repository and called by commit.
+#
+# Nothing is signed and nothing uses a secret: SpelaionDB's repository pins a release by the
+# hashes in its notes.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    uses: spelaion-dev/spelaiondb-plugin-template/.github/workflows/plugin-release.yml@f9ac807de59b6c7b4eb970781a9ce098e809d42f

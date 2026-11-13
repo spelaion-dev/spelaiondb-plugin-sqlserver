@@ -1,0 +1,49 @@
+[package]
+name = "spelaiondb-plugin-sqlserver"
+description = "SQL Server for SpelaionDB: the engine's driver, served as a plugin"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/spelaion-dev/spelaiondb-plugin-sqlserver"
+publish = false
+
+# The driver keeps the name it had inside SpelaionDB: its tests and the program use it.
+[lib]
+name = "spelaion_driver_sqlserver"
+
+[[bin]]
+name = "spelaiondb-plugin-sqlserver"
+path = "src/bin/spelaiondb-plugin-sqlserver.rs"
+
+# The contract, the engine's dialect and the plugin's side of the protocol come from
+# SpelaionDB's repository, by tag (ADR-042): they are one workspace there, so one tag pins
+# them together. Moving the tag is how this plugin follows a protocol change.
+[dependencies]
+spelaion-driver-api = { git = "https://github.com/spelaion-dev/spelaiondb", tag = "plugin-sdk-v0.1.0" }
+spelaion-dialect = { git = "https://github.com/spelaion-dev/spelaiondb", tag = "plugin-sdk-v0.1.0" }
+spelaion-plugin-sdk = { git = "https://github.com/spelaion-dev/spelaiondb", tag = "plugin-sdk-v0.1.0" }
+# The same Arrow as SpelaionDB's: batches cross the two unchanged.
+arrow = { version = "60", default-features = false, features = ["ipc"] }
+async-trait = "0.1"
+futures-util = "0.3"
+# tds80: TDS 8.0 (strict encryption). rustls: no OpenSSL anywhere. Patched: see vendor/tiberius.
+tiberius = { version = "0.13", default-features = false, features = ["tds80", "rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+socket2 = "0.6"
+tokio-util = { version = "0.7", features = ["compat"] }
+
+[dev-dependencies]
+# The conformance set every plugin runs against its own program (tests/conformance.rs).
+spelaion-plugin-host = { git = "https://github.com/spelaion-dev/spelaiondb", tag = "plugin-sdk-v0.1.0" }
+
+# tiberius with the cancel fix (vendor/tiberius/PATCHED.md): read it before upgrading.
+[patch.crates-io]
+tiberius = { path = "vendor/tiberius" }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# What ships is this program: small and without the debugger's tables.
+[profile.release]
+strip = "symbols"
