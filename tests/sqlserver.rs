@@ -947,6 +947,160 @@ async fn introspection_describes_tables() {
     assert!(version.starts_with("16."), "{version}");
 }
 
+/// Runs `body`, then `cleanup` even when the body panicked: the test servers are shared, and
+/// what a failed run leaves behind breaks other tests (SpelaionDB's `tests/support`'s
+/// `cleaning_up`). The cleanup is best effort; the body's own failure is the one reported.
+async fn cleaning_up<T, C>(
+    body: impl std::future::Future<Output = T>,
+    cleanup: impl FnOnce() -> C,
+) -> T
+where
+    C: std::future::Future<Output = ()>,
+{
+    use futures_util::FutureExt;
+    let outcome = std::panic::AssertUnwindSafe(body).catch_unwind().await;
+    cleanup().await;
+    match outcome {
+        Ok(value) => value,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+/// A relation's properties, partitions and dependencies (SpelaionDB's SDB-393), read from the
+/// catalog views.
+#[tokio::test]
+async fn object_details_are_read_from_the_catalog() {
+    let Some(conn) = connect().await else { return };
+    cleaning_up(details_on(&*conn), || async {
+        for drop in [
+            "drop view if exists det.customer_names",
+            "drop table if exists det.child",
+            "drop table if exists det.orders",
+            "drop table if exists det.customer",
+            "if exists (select 1 from sys.partition_schemes where name = 'det_years') drop partition scheme det_years",
+            "if exists (select 1 from sys.partition_functions where name = 'det_years_fn') drop partition function det_years_fn",
+            "if schema_id('det') is not null drop schema det",
+        ] {
+            let _ = run(&*conn, drop).await;
+        }
+    })
+    .await;
+}
+
+async fn details_on(conn: &dyn Connection) {
+    exec_all(
+        conn,
+        "drop view if exists det.customer_names;
+         drop table if exists det.child;
+         drop table if exists det.orders;
+         drop table if exists det.customer;
+         if exists (select 1 from sys.partition_schemes where name = 'det_years') drop partition scheme det_years;
+         if exists (select 1 from sys.partition_functions where name = 'det_years_fn') drop partition function det_years_fn;
+         if schema_id('det') is null exec('create schema det');
+         create partition function det_years_fn (int) as range right for values (2025, 2026);
+         create partition scheme det_years as partition det_years_fn all to ([PRIMARY]);
+         create table det.customer (id int primary key, name nvarchar(80));
+         create table det.orders (id int not null, yr int not null, primary key (id, yr)) on det_years (yr);
+         create table det.child (id int primary key, customer int references det.customer (id));
+         exec('create view det.customer_names as select name from det.customer');
+         exec('create trigger det.customer_touch on det.customer after update as set nocount on')",
+    )
+    .await;
+
+    let properties: Vec<String> = conn
+        .object_properties("det", "customer")
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| {
+            format!(
+                "{}={}",
+                p.name,
+                if p.name == "created" || p.name == "updated" {
+                    "…".into()
+                } else {
+                    p.value
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        properties,
+        ["owner=dbo", "created=…", "updated=…", "filegroup=PRIMARY"]
+    );
+    let partitioned: Vec<String> = conn
+        .object_properties("det", "orders")
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|p| p.name == "partition_scheme")
+        .map(|p| p.value)
+        .collect();
+    assert_eq!(partitioned, ["det_years"]);
+    assert!(conn.object_properties("det", "nope").await.is_err());
+
+    let partitioning = conn
+        .table_partitions("det", "orders")
+        .await
+        .unwrap()
+        .expect("partitioned");
+    assert_eq!(
+        (partitioning.method.as_str(), partitioning.key.as_str()),
+        ("range right", "yr")
+    );
+    let bounds: Vec<(String, Option<String>)> = partitioning
+        .partitions
+        .iter()
+        .map(|p| (p.name.clone(), p.bound.clone()))
+        .collect();
+    assert_eq!(
+        bounds,
+        [
+            ("1".to_string(), Some("< 2025".to_string())),
+            ("2".to_string(), Some(">= 2025 and < 2026".to_string())),
+            ("3".to_string(), Some(">= 2026".to_string())),
+        ]
+    );
+    assert_eq!(
+        conn.table_partitions("det", "customer").await.unwrap(),
+        None
+    );
+
+    let line = |d: &spelaion_driver_api::DependencyInfo| format!("{:?} {}", d.kind, d.name);
+    let customer = conn
+        .object_dependencies("det", "customer")
+        .await
+        .unwrap()
+        .expect("SQL Server records them");
+    assert_eq!(
+        customer.used_by.iter().map(line).collect::<Vec<_>>(),
+        [
+            "View customer_names",
+            "ForeignKey child",
+            "Trigger customer_touch"
+        ]
+    );
+    let view = conn
+        .object_dependencies("det", "customer_names")
+        .await
+        .unwrap()
+        .expect("told");
+    assert_eq!(
+        view.uses.iter().map(line).collect::<Vec<_>>(),
+        ["Table customer"]
+    );
+    let child = conn
+        .object_dependencies("det", "child")
+        .await
+        .unwrap()
+        .expect("told");
+    assert_eq!(
+        child.uses.iter().map(line).collect::<Vec<_>>(),
+        ["Table customer"]
+    );
+    assert!(conn.object_dependencies("det", "nope").await.is_err());
+}
+
 #[tokio::test]
 async fn explorer_lists_routines_sequences_triggers_synonyms_and_types() {
     let Some(conn) = connect().await else { return };

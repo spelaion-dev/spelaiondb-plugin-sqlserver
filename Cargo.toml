@@ -19,9 +19,9 @@ path = "src/bin/spelaiondb-plugin-sqlserver.rs"
 # SpelaionDB's repository, by tag (ADR-042): they are one workspace there, so one tag pins
 # them together. Moving the tag is how this plugin follows a protocol change.
 [dependencies]
-spelaion-driver-api = { git = "https://github.com/spelaion-dev/spelaiondb", tag = "plugin-sdk-v0.1.1" }
-spelaion-dialect = { git = "https://github.com/spelaion-dev/spelaiondb", tag = "plugin-sdk-v0.1.1" }
-spelaion-plugin-sdk = { git = "https://github.com/spelaion-dev/spelaiondb", tag = "plugin-sdk-v0.1.1" }
+spelaion-driver-api = { git = "https://github.com/spelaion-dev/spelaiondb", rev = "ed47cc216fc9e6c3230ac9da52f51badaf10b39e" }
+spelaion-dialect = { git = "https://github.com/spelaion-dev/spelaiondb", rev = "ed47cc216fc9e6c3230ac9da52f51badaf10b39e" }
+spelaion-plugin-sdk = { git = "https://github.com/spelaion-dev/spelaiondb", rev = "ed47cc216fc9e6c3230ac9da52f51badaf10b39e" }
 # The same Arrow as SpelaionDB's: batches cross the two unchanged.
 arrow = { version = "60", default-features = false, features = ["ipc"] }
 async-trait = "0.1"
@@ -35,7 +35,7 @@ tokio-util = { version = "0.7", features = ["compat"] }
 
 [dev-dependencies]
 # The conformance set every plugin runs against its own program (tests/conformance.rs).
-spelaion-plugin-host = { git = "https://github.com/spelaion-dev/spelaiondb", tag = "plugin-sdk-v0.1.1" }
+spelaion-plugin-host = { git = "https://github.com/spelaion-dev/spelaiondb", rev = "ed47cc216fc9e6c3230ac9da52f51badaf10b39e" }
 
 # tiberius with the cancel fix (vendor/tiberius/PATCHED.md): read it before upgrading.
 [patch.crates-io]

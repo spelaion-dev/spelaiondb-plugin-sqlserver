@@ -7,6 +7,7 @@
 
 mod ddl;
 mod decode;
+mod details;
 use spelaion_dialect::sqlserver as dialect;
 mod introspect;
 mod objects;
@@ -19,10 +20,11 @@ use arrow::array::RecordBatch;
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use spelaion_driver_api::{
-    CancelHandle, Capabilities, ConnectParams, Connection, ContextDialect, DatabaseContext, Driver,
-    DriverError, EventStream, ExecEvent, ExecOptions, InsertTarget, KeepAlive, LikeFilter,
-    NameFilter, Notice, ObjectInfo, PlanMode, ReferencingKey, Result, ResultSchema, SchemaColumn,
-    SchemaInfo, SchemaObject, ServerObject, TableInfo, TextRows, TlsMode, TransactionState,
+    CancelHandle, Capabilities, ConnectParams, Connection, ContextDialect, DatabaseContext,
+    Dependencies, Driver, DriverError, EventStream, ExecEvent, ExecOptions, InsertTarget,
+    KeepAlive, LikeFilter, NameFilter, Notice, ObjectInfo, ObjectProperty, Partitioning, PlanMode,
+    ReferencingKey, Result, ResultSchema, SchemaColumn, SchemaInfo, SchemaObject, ServerObject,
+    TableInfo, TextRows, TlsMode, TransactionState,
 };
 use tiberius::{AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryItem};
 use tokio::net::TcpStream;
@@ -946,6 +948,18 @@ impl Connection for SqlServerConnection {
 
     async fn relation_definition(&self, schema: &str, name: &str) -> Result<String> {
         ddl::relation_definition(self, schema, name).await
+    }
+
+    async fn object_properties(&self, schema: &str, name: &str) -> Result<Vec<ObjectProperty>> {
+        details::properties(self, schema, name).await
+    }
+
+    async fn table_partitions(&self, schema: &str, name: &str) -> Result<Option<Partitioning>> {
+        details::partitions(self, schema, name).await
+    }
+
+    async fn object_dependencies(&self, schema: &str, name: &str) -> Result<Option<Dependencies>> {
+        details::dependencies(self, schema, name).await
     }
 
     async fn procedure_call(&self, object: &SchemaObject) -> Result<String> {
