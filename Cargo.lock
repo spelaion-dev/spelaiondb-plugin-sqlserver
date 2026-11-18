@@ -446,6 +446,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "equivalent"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
+
+[[package]]
 name = "errno"
 version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -470,6 +476,12 @@ dependencies = [
  "bitflags",
  "rustc_version",
 ]
+
+[[package]]
+name = "foldhash"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "fs_extra"
@@ -608,6 +620,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31827a206f56af32e590ba56d5d2d085f558508192593743f16b2306495269f"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "indexmap"
+version = "2.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
+dependencies = [
+ "equivalent",
+ "hashbrown",
 ]
 
 [[package]]
@@ -1035,6 +1057,8 @@ version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
+ "foldhash",
+ "indexmap",
  "itoa",
  "memchr",
  "serde",
@@ -1082,29 +1106,31 @@ dependencies = [
 
 [[package]]
 name = "spelaion-dialect"
-version = "0.9.0"
-source = "git+https://github.com/spelaion-dev/spelaiondb?tag=plugin-sdk-v0.1.1#afd0abd60f8739f4c4b921184f93d072985a1956"
+version = "0.10.0"
+source = "git+https://github.com/spelaion-dev/spelaiondb?rev=ed47cc216fc9e6c3230ac9da52f51badaf10b39e#ed47cc216fc9e6c3230ac9da52f51badaf10b39e"
 dependencies = [
+ "serde_json",
  "spelaion-driver-api",
 ]
 
 [[package]]
 name = "spelaion-driver-api"
-version = "0.9.0"
-source = "git+https://github.com/spelaion-dev/spelaiondb?tag=plugin-sdk-v0.1.1#afd0abd60f8739f4c4b921184f93d072985a1956"
+version = "0.10.0"
+source = "git+https://github.com/spelaion-dev/spelaiondb?rev=ed47cc216fc9e6c3230ac9da52f51badaf10b39e#ed47cc216fc9e6c3230ac9da52f51badaf10b39e"
 dependencies = [
  "arrow",
  "async-trait",
  "futures-util",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
 ]
 
 [[package]]
 name = "spelaion-plugin-host"
-version = "0.9.0"
-source = "git+https://github.com/spelaion-dev/spelaiondb?tag=plugin-sdk-v0.1.1#afd0abd60f8739f4c4b921184f93d072985a1956"
+version = "0.10.0"
+source = "git+https://github.com/spelaion-dev/spelaiondb?rev=ed47cc216fc9e6c3230ac9da52f51badaf10b39e#ed47cc216fc9e6c3230ac9da52f51badaf10b39e"
 dependencies = [
  "arrow",
  "async-trait",
@@ -1118,8 +1144,8 @@ dependencies = [
 
 [[package]]
 name = "spelaion-plugin-protocol"
-version = "0.9.0"
-source = "git+https://github.com/spelaion-dev/spelaiondb?tag=plugin-sdk-v0.1.1#afd0abd60f8739f4c4b921184f93d072985a1956"
+version = "0.10.0"
+source = "git+https://github.com/spelaion-dev/spelaiondb?rev=ed47cc216fc9e6c3230ac9da52f51badaf10b39e#ed47cc216fc9e6c3230ac9da52f51badaf10b39e"
 dependencies = [
  "arrow",
  "serde",
@@ -1130,8 +1156,8 @@ dependencies = [
 
 [[package]]
 name = "spelaion-plugin-sdk"
-version = "0.9.0"
-source = "git+https://github.com/spelaion-dev/spelaiondb?tag=plugin-sdk-v0.1.1#afd0abd60f8739f4c4b921184f93d072985a1956"
+version = "0.10.0"
+source = "git+https://github.com/spelaion-dev/spelaiondb?rev=ed47cc216fc9e6c3230ac9da52f51badaf10b39e#ed47cc216fc9e6c3230ac9da52f51badaf10b39e"
 dependencies = [
  "arrow",
  "futures-util",
