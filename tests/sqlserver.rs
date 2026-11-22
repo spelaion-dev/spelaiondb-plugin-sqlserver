@@ -526,6 +526,33 @@ async fn type_zoo() {
     }
 }
 
+/// A column of a CLR type is named by its type (SDB-213): SpelaionDB's map reads geography's
+/// latitude first and geometry's x first, from the same serialization.
+#[tokio::test]
+async fn clr_type_columns_are_named_by_their_type() {
+    let Some(conn) = connect().await else { return };
+    let results = tables(
+        &*conn,
+        "select geometry::Point(1, 2, 0) as m, geography::Point(2, 1, 4326) as g, \
+         hierarchyid::GetRoot() as h, cast(0x01 as varbinary(10)) as b",
+    )
+    .await;
+    let natives: Vec<(&str, LogicalType, &str)> = results[0]
+        .0
+        .iter()
+        .map(|(name, logical, native)| (name.as_str(), *logical, native.as_str()))
+        .collect();
+    assert_eq!(
+        natives,
+        [
+            ("m", LogicalType::Bytes, "geometry"),
+            ("g", LogicalType::Bytes, "geography"),
+            ("h", LogicalType::Bytes, "hierarchyid"),
+            ("b", LogicalType::Bytes, "varbinary"),
+        ]
+    );
+}
+
 #[tokio::test]
 async fn a_batch_returns_every_result_set() {
     let Some(conn) = connect().await else { return };

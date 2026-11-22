@@ -461,10 +461,7 @@ impl TokenColMetaData<'static> {
 
 impl<'a> TokenColMetaData<'a> {
     pub(crate) fn columns(&self) -> impl Iterator<Item = Column> + '_ {
-        self.columns.iter().map(|x| Column {
-            name: x.col_name.to_string(),
-            column_type: ColumnType::from(&x.base.ty),
-        })
+        self.columns.iter().map(|x| Column::from_metadata(x.col_name.to_string(), &x.base.ty))
     }
 }
 

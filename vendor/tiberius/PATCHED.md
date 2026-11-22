@@ -46,3 +46,12 @@ each one in the connection's `Context` (at most `MAX_INFO_MESSAGES`, counting th
 `MAX_INFO_MESSAGES` are exported from `src/lib.rs`. They are kept on any path, also when the batch
 fails before its first result set. `crates/spelaion-core/tests/server_messages.rs` checks `PRINT`, a
 low-severity `RAISERROR` and messages before an error against a real SQL Server.
+
+## Also: a CLR type's name (SDB-213)
+
+A column of a CLR user-defined type comes with its database, schema and type name
+(`UdtInfo`), but `Column` kept only `ColumnType::Udt`, so every such column looked alike:
+`geometry`, `geography` and `hierarchyid` included. SpelaionDB's map needs to tell the first
+two apart (geography stores latitude first). `Column` (`src/row.rs`) now also keeps the type's
+name, `Column::udt_type_name()` returns it, and the metadata decoder (`src/tds/codec/token/
+token_col_metadata.rs`) fills it in from `TypeInfo::Udt`. Nothing else reads it.
