@@ -612,7 +612,7 @@ async fn stream_batch(
                 let metas: Vec<_> = meta
                     .columns()
                     .iter()
-                    .map(|c| decode::column_meta(c.name(), c.column_type()))
+                    .map(decode::result_column_meta)
                     .collect();
                 let types: Vec<ColumnType> =
                     meta.columns().iter().map(|c| c.column_type()).collect();

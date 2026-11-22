@@ -11,12 +11,36 @@ use std::{fmt::Display, sync::Arc};
 pub struct Column {
     pub(crate) name: String,
     pub(crate) column_type: ColumnType,
+    // SpelaionDB patch (SDB-213): a CLR type's name (`geometry`, `geography`…).
+    pub(crate) udt_type_name: Option<String>,
 }
 
 impl Column {
     /// Construct a new Column.
     pub fn new(name: String, column_type: ColumnType) -> Self {
-        Self { name, column_type }
+        Self {
+            name,
+            column_type,
+            udt_type_name: None,
+        }
+    }
+
+    // SpelaionDB patch (SDB-213): built from a column's metadata, with a CLR type's name.
+    pub(crate) fn from_metadata(name: String, ty: &TypeInfo) -> Self {
+        Self {
+            name,
+            column_type: ColumnType::from(ty),
+            udt_type_name: match ty {
+                TypeInfo::Udt(info) => Some(info.type_name.clone()),
+                _ => None,
+            },
+        }
+    }
+
+    /// The name of a CLR user-defined type (`geometry`, `geography`, `hierarchyid` or the
+    /// user's own), for a column of one; `None` for every other column. SpelaionDB patch.
+    pub fn udt_type_name(&self) -> Option<&str> {
+        self.udt_type_name.as_deref()
     }
 
     /// The name of the column.

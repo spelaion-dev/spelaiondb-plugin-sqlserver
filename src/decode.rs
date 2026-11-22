@@ -21,6 +21,17 @@ const DAYS_0001_TO_1970: i64 = 719_162;
 const DAYS_1900_TO_1970: i64 = 25_567;
 const MICROS_PER_DAY: i64 = 86_400_000_000;
 
+/// A result column's metadata. A column of a CLR type is named by its type (`geometry`,
+/// `geography`, `hierarchyid`…), so SpelaionDB can tell geography (latitude first) from
+/// geometry on its map (SDB-213); `udt` only when the server gave no name.
+pub fn result_column_meta(column: &tiberius::Column) -> ColumnMeta {
+    let mut meta = column_meta(column.name(), column.column_type());
+    if let Some(name) = column.udt_type_name().filter(|name| !name.is_empty()) {
+        meta.native_type = name.to_ascii_lowercase();
+    }
+    meta
+}
+
 /// The logical type and SQL Server's name for a column type.
 pub fn column_meta(name: &str, column_type: ColumnType) -> ColumnMeta {
     let (logical, native) = match column_type {

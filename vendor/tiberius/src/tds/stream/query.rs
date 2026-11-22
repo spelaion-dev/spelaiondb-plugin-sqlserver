@@ -390,10 +390,7 @@ impl<'a> Stream for QueryStream<'a> {
                     let column_meta = meta
                         .columns
                         .iter()
-                        .map(|x| Column {
-                            name: x.col_name.to_string(),
-                            column_type: ColumnType::from(&x.base.ty),
-                        })
+                        .map(|x| Column::from_metadata(x.col_name.to_string(), &x.base.ty))
                         .collect::<Vec<_>>();
 
                     let column_meta = Arc::new(column_meta);
