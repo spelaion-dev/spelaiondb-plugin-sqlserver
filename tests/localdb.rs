@@ -44,13 +44,17 @@ async fn values(conn: &dyn Connection, sql: &str) -> Vec<String> {
         .await
         .unwrap_or_else(|e| panic!("{sql}: {e}"));
     let mut out = Vec::new();
+    // The first column's type, as the result's header says.
+    let mut logical = spelaion_driver_api::LogicalType::Text;
     for event in events {
+        if let ExecEvent::Columns(schema) = &event {
+            logical = schema.columns[0].logical;
+        }
         if let ExecEvent::Batch(batch) = event {
             for row in 0..batch.num_rows() {
-                let value =
-                    Value::from_array(batch.column(0), row, spelaion_driver_api::LogicalType::Text)
-                        .map(|v| v.to_string())
-                        .unwrap_or_default();
+                let value = Value::from_array(batch.column(0), row, logical)
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
                 out.push(value);
             }
         }
