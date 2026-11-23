@@ -5,6 +5,7 @@
 //! (procedures, `sp_help`), and each one becomes a result. Cancelling sends a TDS Attention,
 //! which stops the running batch and keeps the session (`KILL` would end it).
 
+mod babelfish;
 mod ddl;
 mod decode;
 use spelaion_dialect::sqlserver as dialect;
@@ -241,7 +242,12 @@ impl Driver for SqlServerDriver {
     }
 
     async fn connect(&self, params: &ConnectParams) -> Result<Box<dyn Connection>> {
-        let client = open(params).await?;
+        let mut client = open(params).await?;
+        // Babelfish differs in a few places, told from the server itself (SDB-313).
+        let babelfish = babelfish::Babelfish::recognise(&mut client, params)
+            .await
+            .map(Arc::new);
+        let explain = babelfish.is_none();
         let (cancels, cancelled) = watch::channel(0u64);
         let (requests, receiver) = mpsc::channel(8);
         tokio::spawn(actor(
@@ -249,6 +255,7 @@ impl Driver for SqlServerDriver {
             receiver,
             cancelled,
             Some(params.database.clone()),
+            babelfish,
         ));
         Ok(Box::new(SqlServerConnection {
             requests,
@@ -256,7 +263,8 @@ impl Driver for SqlServerDriver {
             capabilities: Capabilities {
                 transactions: true,
                 cancel: true,
-                explain: true,
+                // Babelfish has no plans.
+                explain,
                 editable_results: false,
                 schemas: true,
                 insert_rows: true,
@@ -320,6 +328,7 @@ async fn actor(
     mut requests: mpsc::Receiver<Request>,
     mut cancels: watch::Receiver<u64>,
     database: Option<String>,
+    babelfish: Option<Arc<babelfish::Babelfish>>,
 ) {
     let mut context = DatabaseContext::new(ContextDialect::SqlServer, database);
     // An interrupted or failed response may have hidden transaction ENVCHANGE tokens.
@@ -389,6 +398,20 @@ async fn actor(
                     finished,
                     ExecutionOutcome::Cancelled | ExecutionOutcome::Abandoned
                 ) {
+                    // Babelfish answers the Attention only once the statement ends on its own:
+                    // it is stopped first. Where that took the whole session, it is gone: said
+                    // as such, and nothing more runs on it.
+                    if let Some(babelfish) = &babelfish
+                        && let Ok(babelfish::Stopped::Session) = babelfish.stop_running().await
+                    {
+                        let _ = events
+                            .send(Err(DriverError::Connection(
+                                babelfish::SESSION_ENDED.into(),
+                            )))
+                            .await;
+                        requests.close();
+                        return;
+                    }
                     // The batch's stream is dropped: the Attention stops it on the server and
                     // drains what was left, so the session goes on.
                     let result = client.cancel_query().await;
@@ -445,11 +468,22 @@ async fn actor(
                 let _ = reply.send(result);
             }
             Request::KeepAlive { reply } => {
-                let result = match if transaction_state_unknown {
+                let open = if transaction_state_unknown {
                     Ok(true)
+                } else if babelfish.is_some() {
+                    // No transaction descriptor on Babelfish: the server says.
+                    match rows(&mut client, "select xact_state()", &[]).await {
+                        Ok(rows) => Ok(rows
+                            .first()
+                            .and_then(|row| row.first())
+                            .and_then(|value| value.as_deref())
+                            != Some("0")),
+                        Err(_) => Ok(true),
+                    }
                 } else {
                     client.in_transaction().await
-                } {
+                };
+                let result = match open {
                     Ok(true) => Ok(KeepAlive::InTransaction),
                     Ok(false) => rows(&mut client, "select 1", &[])
                         .await
@@ -459,11 +493,12 @@ async fn actor(
                 let _ = reply.send(result);
             }
             Request::TransactionState { reply } => {
-                let result = if transaction_state_unknown {
+                // Babelfish sends no transaction descriptor: the server is always asked.
+                let result = if transaction_state_unknown || babelfish.is_some() {
                     // After an error or a cancel: ask the server. -1 is a transaction that
                     // can only be rolled back (`XACT_ABORT`, some errors).
                     let answer = rows(&mut client, "select xact_state()", &[]).await;
-                    transaction_state_unknown = answer.is_err();
+                    transaction_state_unknown = answer.is_err() && babelfish.is_none();
                     answer.map(|rows| {
                         match rows
                             .first()
