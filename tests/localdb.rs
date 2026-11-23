@@ -3,12 +3,14 @@
 //! wherever `SqlLocalDB` is installed (GitHub's Windows runners have it); without it the test
 //! says so and stops, which does not count as tested. Elsewhere it checks the refusal.
 
+#[cfg(windows)]
 use std::time::Duration;
 
+#[cfg(windows)]
 use futures_util::TryStreamExt;
-use spelaion_driver_api::{
-    ConnectParams, Connection, Driver, DriverError, ExecEvent, ExecOptions, TlsMode, Value,
-};
+use spelaion_driver_api::{ConnectParams, Driver};
+#[cfg(windows)]
+use spelaion_driver_api::{Connection, DriverError, ExecEvent, ExecOptions, TlsMode, Value};
 use spelaion_driver_sqlserver::SqlServerDriver;
 
 const INSTANCE: &str = "(localdb)\\MSSQLLocalDB";
