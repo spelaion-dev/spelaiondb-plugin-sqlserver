@@ -9,8 +9,10 @@ mod ddl;
 mod decode;
 use spelaion_dialect::sqlserver as dialect;
 mod introspect;
+mod localdb;
 mod objects;
 mod plan;
+mod transport;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,30 +30,49 @@ use tiberius::{AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryIte
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
+use transport::Transport;
 
 pub use dialect::SqlServerDialect;
 
 /// SQL Server's "chosen as deadlock victim" error.
 const DEADLOCK_VICTIM: &str = "1205";
 
-type SqlClient = Client<Compat<TcpStream>>;
+type SqlClient = Client<Compat<Transport>>;
 
 #[derive(Debug, Default, Clone)]
 pub struct SqlServerDriver;
 
-fn config(params: &ConnectParams) -> Result<Config> {
+/// The login and TLS settings. `localdb`: the instance is a LocalDB one, reached through its
+/// pipe on this machine (SDB-312).
+fn config(params: &ConnectParams, localdb: bool) -> Result<Config> {
     let mut config = Config::new();
-    // The real name: TLS checks it even when the TCP connection goes to a tunnel's local end.
-    config.host(&params.host);
-    config.port(params.port);
+    if localdb {
+        // No network name: the pipe is this machine's.
+        config.host("localhost");
+    } else {
+        // The real name: TLS checks it even when the TCP connection goes to a tunnel's local end.
+        config.host(&params.host);
+        config.port(params.port);
+    }
     if !params.database.is_empty() {
         config.database(&params.database);
     }
     config.application_name(params.application_name.as_deref().unwrap_or("SpelaionDB"));
     if params.user.is_empty() {
-        return Err(DriverError::Connection(
-            "SQL Server needs a user: Windows authentication is not supported yet".into(),
-        ));
+        // A LocalDB instance belongs to the Windows account that runs it, which it logs in as
+        // it is (Windows authentication, SSPI).
+        #[cfg(windows)]
+        if localdb {
+            config.authentication(AuthMethod::Integrated);
+            config.encryption(EncryptionLevel::Off);
+            config.trust_cert();
+            return Ok(config);
+        }
+        return Err(DriverError::Connection(if localdb {
+            "SQL Server LocalDB runs only on Windows".into()
+        } else {
+            "SQL Server needs a user: Windows authentication is only for LocalDB so far".into()
+        }));
     }
     let password = params
         .password
@@ -59,6 +80,20 @@ fn config(params: &ConnectParams) -> Result<Config> {
         .map(|p| p.expose().to_string())
         .unwrap_or_default();
     config.authentication(AuthMethod::sql_server(&params.user, password));
+    if localdb {
+        // The pipe never leaves this machine and LocalDB's certificate is its own: the login
+        // is still encrypted, as below, and there is nothing to verify.
+        return match params.tls {
+            TlsMode::Disable | TlsMode::Prefer | TlsMode::Require => {
+                config.encryption(EncryptionLevel::Off);
+                config.trust_cert();
+                Ok(config)
+            }
+            TlsMode::VerifyCa | TlsMode::VerifyFull => Err(DriverError::Connection(
+                "a LocalDB instance is reached through its pipe on this machine and has no certificate to verify: leave TLS unset".into(),
+            )),
+        };
+    }
     // libpq-style modes. `disable` still encrypts the login (without checking the
     // certificate), as every SQL Server client does, so the password never travels in the
     // clear. `verify-ca` also checks the name: the TLS library cannot check only the authority.
@@ -88,23 +123,40 @@ fn config(params: &ConnectParams) -> Result<Config> {
 async fn open(params: &ConnectParams) -> Result<SqlClient> {
     // rustls needs one crypto provider for the process: ring, like the other drivers.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let config = config(params)?;
+    let localdb = localdb::instance(&params.host);
+    if localdb.is_some() && params.connect_addr.is_some() {
+        return Err(DriverError::Connection(
+            "a LocalDB instance is reached through its pipe on this machine: not through a tunnel"
+                .into(),
+        ));
+    }
+    let config = config(params, localdb.is_some())?;
     let address = match params.connect_addr {
         Some(addr) => addr.to_string(),
         None => format!("{}:{}", params.host, params.port),
     };
+    let timeout = params.connect_timeout();
     let connect = async {
-        let tcp = TcpStream::connect(&address)
-            .await
-            .map_err(|e| DriverError::Connection(format!("could not reach {address}: {e}")))?;
-        let _ = tcp.set_nodelay(true);
-        // TCP keepalive after a minute idle, so a NAT in front of the server does not drop a
-        // direct connection (ADR-028).
-        let keepalive = socket2::TcpKeepalive::new()
-            .with_time(Duration::from_secs(60))
-            .with_interval(Duration::from_secs(10));
-        let _ = socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive);
-        Client::connect(config, tcp.compat_write())
+        let stream = match localdb {
+            Some(name) => {
+                let pipe = localdb::start(name, timeout).await?;
+                pipe_transport(&pipe).await?
+            }
+            None => {
+                let tcp = TcpStream::connect(&address).await.map_err(|e| {
+                    DriverError::Connection(format!("could not reach {address}: {e}"))
+                })?;
+                let _ = tcp.set_nodelay(true);
+                // TCP keepalive after a minute idle, so a NAT in front of the server does not
+                // drop a direct connection (ADR-028).
+                let keepalive = socket2::TcpKeepalive::new()
+                    .with_time(Duration::from_secs(60))
+                    .with_interval(Duration::from_secs(10));
+                let _ = socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive);
+                Transport::Tcp(tcp)
+            }
+        };
+        Client::connect(config, stream.compat_write())
             .await
             .map_err(|e| match e {
                 // Azure SQL may send the login elsewhere; not through a tunnel.
@@ -114,10 +166,25 @@ async fn open(params: &ConnectParams) -> Result<SqlClient> {
                 other => map_error(other, None),
             })
     };
-    let timeout = params.connect_timeout();
     tokio::time::timeout(timeout, connect)
         .await
         .map_err(|_| DriverError::Connection(format!("no response in {} s", timeout.as_secs())))?
+}
+
+/// The LocalDB instance's pipe, opened (SDB-312).
+#[cfg(windows)]
+async fn pipe_transport(pipe: &str) -> Result<Transport> {
+    Transport::pipe(pipe)
+        .await
+        .map_err(|e| DriverError::Connection(format!("could not open the pipe {pipe}: {e}")))
+}
+
+/// No pipes elsewhere: [`localdb::start`] already said so.
+#[cfg(not(windows))]
+async fn pipe_transport(pipe: &str) -> Result<Transport> {
+    Err(DriverError::Connection(format!(
+        "{pipe} is a Windows pipe: LocalDB runs only on Windows"
+    )))
 }
 
 #[async_trait]
