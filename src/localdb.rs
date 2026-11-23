@@ -58,9 +58,20 @@ pub fn pipe_in(info: &str) -> Option<String> {
     (pipe.len() > "\\\\.\\pipe\\".len()).then_some(pipe)
 }
 
-/// Starts the instance `name` if it is not running, and answers its pipe.
+/// How long starting an instance may take. A cold start (the first one after the machine
+/// starts, or after LocalDB was installed) takes tens of seconds, longer than a login: it has
+/// this allowance of its own, apart from the connection's `connect_timeout`, so `SqlLocalDB`
+/// is not stopped half way, which leaves the instance stopped.
 #[cfg(windows)]
-pub async fn start(name: &str, timeout: std::time::Duration) -> Result<String> {
+const START_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How long the pipe may take to show in `SqlLocalDB info` once `start` has answered.
+#[cfg(windows)]
+const PIPE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Starts the instance `name` if it is not running, and answers its pipe once it has one.
+#[cfg(windows)]
+pub async fn start(name: &str) -> Result<String> {
     check_name(name)?;
     let run = async {
         let started = sqllocaldb(&["start", name]).await?;
@@ -70,26 +81,35 @@ pub async fn start(name: &str, timeout: std::time::Duration) -> Result<String> {
                 said(&started)
             )));
         }
-        let info = sqllocaldb(&["info", name]).await?;
-        let text = String::from_utf8_lossy(&info.stdout);
-        pipe_in(&text).ok_or_else(|| {
-            DriverError::Connection(format!(
-                "the LocalDB instance {name} gave no pipe to connect to: {}",
-                said(&info)
-            ))
-        })
+        // The pipe is in `info` once the instance runs, which may be a moment after `start`.
+        let waiting = tokio::time::Instant::now();
+        loop {
+            let info = sqllocaldb(&["info", name]).await?;
+            if let Some(pipe) = pipe_in(&String::from_utf8_lossy(&info.stdout)) {
+                return Ok(pipe);
+            }
+            if !info.status.success() || waiting.elapsed() > PIPE_WAIT {
+                return Err(DriverError::Connection(format!(
+                    "the LocalDB instance {name} gave no pipe to connect to: {}",
+                    said(&info)
+                )));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
     };
-    tokio::time::timeout(timeout, run).await.map_err(|_| {
-        DriverError::Connection(format!(
-            "the LocalDB instance {name} did not start in {} s",
-            timeout.as_secs()
-        ))
-    })?
+    tokio::time::timeout(START_TIMEOUT, run)
+        .await
+        .map_err(|_| {
+            DriverError::Connection(format!(
+                "the LocalDB instance {name} did not start in {} s",
+                START_TIMEOUT.as_secs()
+            ))
+        })?
 }
 
 /// LocalDB exists only on Windows.
 #[cfg(not(windows))]
-pub async fn start(name: &str, _timeout: std::time::Duration) -> Result<String> {
+pub async fn start(name: &str) -> Result<String> {
     check_name(name)?;
     Err(DriverError::Connection(format!(
         "SQL Server LocalDB runs only on Windows: the instance {name} cannot be reached from this system"

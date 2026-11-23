@@ -143,55 +143,89 @@ async fn open(params: &ConnectParams) -> Result<SqlClient> {
         None => format!("{}:{}", params.host, params.port),
     };
     let timeout = params.connect_timeout();
-    let connect = async {
-        let stream = match localdb {
-            Some(name) => {
-                let pipe = localdb::start(name, timeout).await?;
-                pipe_transport(&pipe).await?
-            }
-            None => {
-                let tcp = TcpStream::connect(&address).await.map_err(|e| {
-                    DriverError::Connection(format!("could not reach {address}: {e}"))
-                })?;
-                let _ = tcp.set_nodelay(true);
-                // TCP keepalive after a minute idle, so a NAT in front of the server does not
-                // drop a direct connection (ADR-028).
-                let keepalive = socket2::TcpKeepalive::new()
-                    .with_time(Duration::from_secs(60))
-                    .with_interval(Duration::from_secs(10));
-                let _ = socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive);
-                Transport::Tcp(tcp)
-            }
-        };
-        Client::connect(config, stream.compat_write())
+    let login_error = |e: tiberius::error::Error| match e {
+        // Azure SQL may send the login elsewhere; not through a tunnel.
+        tiberius::error::Error::Routing { host, port } => DriverError::Connection(format!(
+            "the server redirects to {host}:{port}; connect to that address instead"
+        )),
+        other => map_error(other, None),
+    };
+    if let Some(name) = localdb {
+        // Started first, with an allowance of its own: a cold start takes longer than a login.
+        let pipe = localdb::start(name).await?;
+        return login_through_pipe(&pipe, &config, timeout)
             .await
-            .map_err(|e| match e {
-                // Azure SQL may send the login elsewhere; not through a tunnel.
-                tiberius::error::Error::Routing { host, port } => DriverError::Connection(format!(
-                    "the server redirects to {host}:{port}; connect to that address instead"
-                )),
-                other => map_error(other, None),
-            })
+            .map_err(login_error);
+    }
+    let connect = async {
+        let tcp = TcpStream::connect(&address)
+            .await
+            .map_err(|e| DriverError::Connection(format!("could not reach {address}: {e}")))?;
+        let _ = tcp.set_nodelay(true);
+        // TCP keepalive after a minute idle, so a NAT in front of the server does not drop a
+        // direct connection (ADR-028).
+        let keepalive = socket2::TcpKeepalive::new()
+            .with_time(Duration::from_secs(60))
+            .with_interval(Duration::from_secs(10));
+        let _ = socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive);
+        Client::connect(config, Transport::Tcp(tcp).compat_write())
+            .await
+            .map_err(login_error)
     };
     tokio::time::timeout(timeout, connect)
         .await
         .map_err(|_| DriverError::Connection(format!("no response in {} s", timeout.as_secs())))?
 }
 
+/// Logs in through a LocalDB instance's pipe (SDB-312). A just-started instance may have its
+/// pipe before it takes logins, and then closes it at once: the pipe is opened and the login
+/// tried again while that happens, until `timeout`. Any other failure (the login refused) ends
+/// it at once.
+async fn login_through_pipe(
+    pipe: &str,
+    config: &Config,
+    timeout: Duration,
+) -> std::result::Result<SqlClient, tiberius::error::Error> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let attempt = async {
+            let stream = pipe_transport(pipe).await?;
+            Client::connect(config.clone(), stream.compat_write()).await
+        };
+        let failure = match tokio::time::timeout_at(deadline, attempt).await {
+            Ok(Ok(client)) => return Ok(client),
+            Ok(Err(e)) => e,
+            Err(_) => {
+                return Err(tiberius::error::Error::Io {
+                    kind: std::io::ErrorKind::TimedOut,
+                    message: format!("no answer through {pipe} in {} s", timeout.as_secs()),
+                });
+            }
+        };
+        let not_ready = matches!(failure, tiberius::error::Error::Io { .. });
+        if !not_ready || tokio::time::Instant::now() + PIPE_RETRY >= deadline {
+            return Err(failure);
+        }
+        tokio::time::sleep(PIPE_RETRY).await;
+    }
+}
+
+/// How long a login through a LocalDB pipe waits before it is tried again.
+const PIPE_RETRY: Duration = Duration::from_millis(250);
+
 /// The LocalDB instance's pipe, opened (SDB-312).
 #[cfg(windows)]
-async fn pipe_transport(pipe: &str) -> Result<Transport> {
-    Transport::pipe(pipe)
-        .await
-        .map_err(|e| DriverError::Connection(format!("could not open the pipe {pipe}: {e}")))
+async fn pipe_transport(pipe: &str) -> std::result::Result<Transport, tiberius::error::Error> {
+    Ok(Transport::pipe(pipe).await?)
 }
 
 /// No pipes elsewhere: [`localdb::start`] already said so.
 #[cfg(not(windows))]
-async fn pipe_transport(pipe: &str) -> Result<Transport> {
-    Err(DriverError::Connection(format!(
-        "{pipe} is a Windows pipe: LocalDB runs only on Windows"
-    )))
+async fn pipe_transport(pipe: &str) -> std::result::Result<Transport, tiberius::error::Error> {
+    Err(tiberius::error::Error::Io {
+        kind: std::io::ErrorKind::Unsupported,
+        message: format!("{pipe} is a Windows pipe: LocalDB runs only on Windows"),
+    })
 }
 
 #[async_trait]
