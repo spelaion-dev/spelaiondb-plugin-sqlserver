@@ -48,6 +48,7 @@ pub fn check_name(name: &str) -> Result<()> {
 
 /// The instance's pipe (`\\.\pipe\LOCALDB#…\tsql\query`) in `SqlLocalDB info`'s output, which
 /// Windows writes in the system's language: the one value that starts with `np:\\.\pipe\`.
+#[cfg(any(windows, test))]
 pub fn pipe_in(info: &str) -> Option<String> {
     let start = info.find("np:\\\\.\\pipe\\")?;
     let pipe: String = info[start + 3..]
