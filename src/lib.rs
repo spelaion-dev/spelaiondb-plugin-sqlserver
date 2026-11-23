@@ -61,10 +61,17 @@ fn config(params: &ConnectParams, localdb: bool) -> Result<Config> {
     if params.user.is_empty() {
         // A LocalDB instance belongs to the Windows account that runs it, which it logs in as
         // it is (Windows authentication, SSPI).
+        // No password travels: with `disable` nothing is encrypted on the pipe, which never
+        // leaves this machine.
         #[cfg(windows)]
         if localdb {
             config.authentication(AuthMethod::Integrated);
-            config.encryption(EncryptionLevel::Off);
+            config.encryption(match params.tls {
+                TlsMode::Disable => EncryptionLevel::NotSupported,
+                TlsMode::Prefer | TlsMode::Require | TlsMode::VerifyCa | TlsMode::VerifyFull => {
+                    EncryptionLevel::Off
+                }
+            });
             config.trust_cert();
             return Ok(config);
         }

@@ -80,10 +80,37 @@ async fn localdb_is_started_and_reached_through_its_pipe() {
         String::from_utf8_lossy(&stopped.stdout).trim()
     );
 
-    let conn = SqlServerDriver
-        .connect(&localdb(INSTANCE))
-        .await
-        .unwrap_or_else(|e| panic!("{INSTANCE}: {e}"));
+    // Each TLS setting, as the user may leave it: `disable` sends nothing encrypted (no
+    // password travels), the others encrypt the login.
+    let mut opened = Vec::new();
+    for tls in [TlsMode::Prefer, TlsMode::Disable, TlsMode::Require] {
+        let outcome = SqlServerDriver
+            .connect(&ConnectParams {
+                tls,
+                ..localdb(INSTANCE)
+            })
+            .await;
+        eprintln!(
+            "LocalDB with tls {tls:?}: {}",
+            match &outcome {
+                Ok(_) => "connected".to_string(),
+                Err(e) => e.to_string(),
+            }
+        );
+        if let Ok(conn) = outcome {
+            opened.push(conn);
+        }
+    }
+    let info = Command::new("SqlLocalDB.exe")
+        .args(["info", "MSSQLLocalDB"])
+        .output()
+        .unwrap();
+    eprintln!(
+        "SqlLocalDB info: {}",
+        String::from_utf8_lossy(&info.stdout).trim()
+    );
+    assert_eq!(opened.len(), 3, "every TLS setting connects");
+    let conn = opened.remove(0);
     assert_eq!(
         values(&*conn, "SELECT CAST(SERVERPROPERTY('IsLocalDB') AS int)").await,
         ["1"]
