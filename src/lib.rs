@@ -9,6 +9,7 @@ mod ddl;
 mod decode;
 use spelaion_dialect::sqlserver as dialect;
 mod introspect;
+mod localdb;
 mod objects;
 mod plan;
 
@@ -25,6 +26,7 @@ use spelaion_driver_api::{
     SchemaInfo, SchemaObject, ServerObject, TableInfo, TextRows, TlsMode, TransactionState,
 };
 use tiberius::{AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryItem};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
@@ -34,12 +36,15 @@ pub use dialect::SqlServerDialect;
 /// SQL Server's "chosen as deadlock victim" error.
 const DEADLOCK_VICTIM: &str = "1205";
 
-type SqlClient = Client<Compat<TcpStream>>;
+trait Transport: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T: AsyncRead + AsyncWrite + Unpin + Send> Transport for T {}
+
+type SqlClient = Client<Compat<Box<dyn Transport>>>;
 
 #[derive(Debug, Default, Clone)]
 pub struct SqlServerDriver;
 
-fn config(params: &ConnectParams) -> Result<Config> {
+fn common_config(params: &ConnectParams) -> Config {
     let mut config = Config::new();
     // The real name: TLS checks it even when the TCP connection goes to a tunnel's local end.
     config.host(&params.host);
@@ -48,6 +53,11 @@ fn config(params: &ConnectParams) -> Result<Config> {
         config.database(&params.database);
     }
     config.application_name(params.application_name.as_deref().unwrap_or("SpelaionDB"));
+    config
+}
+
+fn tcp_config(params: &ConnectParams) -> Result<Config> {
+    let mut config = common_config(params);
     if params.user.is_empty() {
         return Err(DriverError::Connection(
             "SQL Server needs a user: Windows authentication is not supported yet".into(),
@@ -86,25 +96,19 @@ fn config(params: &ConnectParams) -> Result<Config> {
 }
 
 async fn open(params: &ConnectParams) -> Result<SqlClient> {
+    if let Some(option) = params.options.keys().find(|key| *key != localdb::INSTANCE) {
+        return Err(DriverError::Connection(format!(
+            "unsupported SQL Server connection option: {option}"
+        )));
+    }
     // rustls needs one crypto provider for the process: ring, like the other drivers.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let config = config(params)?;
-    let address = match params.connect_addr {
-        Some(addr) => addr.to_string(),
-        None => format!("{}:{}", params.host, params.port),
-    };
     let connect = async {
-        let tcp = TcpStream::connect(&address)
-            .await
-            .map_err(|e| DriverError::Connection(format!("could not reach {address}: {e}")))?;
-        let _ = tcp.set_nodelay(true);
-        // TCP keepalive after a minute idle, so a NAT in front of the server does not drop a
-        // direct connection (ADR-028).
-        let keepalive = socket2::TcpKeepalive::new()
-            .with_time(Duration::from_secs(60))
-            .with_interval(Duration::from_secs(10));
-        let _ = socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive);
-        Client::connect(config, tcp.compat_write())
+        let (config, stream) = match params.options.get(localdb::INSTANCE) {
+            Some(instance) => localdb::open(params, instance).await?,
+            None => open_tcp(params).await?,
+        };
+        Client::connect(config, stream.compat_write())
             .await
             .map_err(|e| match e {
                 // Azure SQL may send the login elsewhere; not through a tunnel.
@@ -118,6 +122,25 @@ async fn open(params: &ConnectParams) -> Result<SqlClient> {
     tokio::time::timeout(timeout, connect)
         .await
         .map_err(|_| DriverError::Connection(format!("no response in {} s", timeout.as_secs())))?
+}
+
+async fn open_tcp(params: &ConnectParams) -> Result<(Config, Box<dyn Transport>)> {
+    let config = tcp_config(params)?;
+    let address = match params.connect_addr {
+        Some(addr) => addr.to_string(),
+        None => format!("{}:{}", params.host, params.port),
+    };
+    let tcp = TcpStream::connect(&address)
+        .await
+        .map_err(|e| DriverError::Connection(format!("could not reach {address}: {e}")))?;
+    let _ = tcp.set_nodelay(true);
+    // TCP keepalive after a minute idle, so a NAT in front of the server does not drop a
+    // direct connection (ADR-028).
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(Duration::from_secs(60))
+        .with_interval(Duration::from_secs(10));
+    let _ = socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive);
+    Ok((config, Box::new(tcp)))
 }
 
 #[async_trait]

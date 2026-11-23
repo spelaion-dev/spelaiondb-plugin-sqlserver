@@ -23,3 +23,26 @@ jobs:
       # are skipped there, saying so.
       test-env: |
         SPELAION_TEST_MSSQL=127.0.0.1:11433
+
+  localdb:
+    name: Windows LocalDB protocol conformance
+    # The hosted Windows Server 2022 image includes SQL.LocalDB.Runtime in Visual Studio.
+    # https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
+    runs-on: windows-2022
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: stable
+      - name: Create an isolated LocalDB instance
+        shell: pwsh
+        run: |
+          $tools = Join-Path $env:ProgramFiles 'Microsoft SQL Server/*/Tools/Binn/SqlLocalDB.exe'
+          $program = Get-Item -Path $tools | Sort-Object { [int]$_.Directory.Parent.Parent.Name } -Descending | Select-Object -First 1
+          if (-not $program) { throw 'The Windows runner lacks SqlLocalDB.exe' }
+          & $program.FullName create SpelaionConformance
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: cargo test --locked --test conformance -- localdb_plugin_conforms --exact
+        env:
+          SPELAION_TEST_LOCALDB: SpelaionConformance
