@@ -58,28 +58,13 @@ fn config(params: &ConnectParams, localdb: bool) -> Result<Config> {
         config.database(&params.database);
     }
     config.application_name(params.application_name.as_deref().unwrap_or("SpelaionDB"));
+    if localdb {
+        return localdb_login(config, params);
+    }
     if params.user.is_empty() {
-        // A LocalDB instance belongs to the Windows account that runs it, which it logs in as
-        // it is (Windows authentication, SSPI).
-        // No password travels: with `disable` nothing is encrypted on the pipe, which never
-        // leaves this machine.
-        #[cfg(windows)]
-        if localdb {
-            config.authentication(AuthMethod::Integrated);
-            config.encryption(match params.tls {
-                TlsMode::Disable => EncryptionLevel::NotSupported,
-                TlsMode::Prefer | TlsMode::Require | TlsMode::VerifyCa | TlsMode::VerifyFull => {
-                    EncryptionLevel::Off
-                }
-            });
-            config.trust_cert();
-            return Ok(config);
-        }
-        return Err(DriverError::Connection(if localdb {
-            "SQL Server LocalDB runs only on Windows".into()
-        } else {
-            "SQL Server needs a user: Windows authentication is only for LocalDB so far".into()
-        }));
+        return Err(DriverError::Connection(
+            "SQL Server needs a user: Windows authentication is only for LocalDB so far".into(),
+        ));
     }
     let password = params
         .password
@@ -87,20 +72,6 @@ fn config(params: &ConnectParams, localdb: bool) -> Result<Config> {
         .map(|p| p.expose().to_string())
         .unwrap_or_default();
     config.authentication(AuthMethod::sql_server(&params.user, password));
-    if localdb {
-        // The pipe never leaves this machine and LocalDB's certificate is its own: the login
-        // is still encrypted, as below, and there is nothing to verify.
-        return match params.tls {
-            TlsMode::Disable | TlsMode::Prefer | TlsMode::Require => {
-                config.encryption(EncryptionLevel::Off);
-                config.trust_cert();
-                Ok(config)
-            }
-            TlsMode::VerifyCa | TlsMode::VerifyFull => Err(DriverError::Connection(
-                "a LocalDB instance is reached through its pipe on this machine and has no certificate to verify: leave TLS unset".into(),
-            )),
-        };
-    }
     // libpq-style modes. `disable` still encrypts the login (without checking the
     // certificate), as every SQL Server client does, so the password never travels in the
     // clear. `verify-ca` also checks the name: the TLS library cannot check only the authority.
@@ -124,6 +95,41 @@ fn config(params: &ConnectParams, localdb: bool) -> Result<Config> {
             }
         }
     }
+    Ok(config)
+}
+
+/// The login to a LocalDB instance (SDB-312, ADR-068). With no user, the Windows account that
+/// owns the instance logs in as it is (SSPI); a SQL login may log in too if the instance has one.
+///
+/// Nothing is encrypted with TLS: the pipe is communication within this machine, which another
+/// user's process cannot read, and LocalDB closes it when tiberius starts TLS inside it (seen on
+/// GitHub's Windows runners, with SQL Server 2025's LocalDB). There is no certificate to verify
+/// either, so `verify-ca` and `verify-full` are refused rather than quietly not honoured.
+fn localdb_login(mut config: Config, params: &ConnectParams) -> Result<Config> {
+    match params.tls {
+        TlsMode::Disable | TlsMode::Prefer | TlsMode::Require => {}
+        TlsMode::VerifyCa | TlsMode::VerifyFull => {
+            return Err(DriverError::Connection(
+                "a LocalDB instance is reached through its pipe on this machine and has no certificate to verify: leave TLS unset".into(),
+            ));
+        }
+    }
+    if params.user.is_empty() {
+        #[cfg(windows)]
+        config.authentication(AuthMethod::Integrated);
+        #[cfg(not(windows))]
+        return Err(DriverError::Connection(
+            "SQL Server LocalDB runs only on Windows".into(),
+        ));
+    } else {
+        let password = params
+            .password
+            .as_ref()
+            .map(|p| p.expose().to_string())
+            .unwrap_or_default();
+        config.authentication(AuthMethod::sql_server(&params.user, password));
+    }
+    config.encryption(EncryptionLevel::NotSupported);
     Ok(config)
 }
 
