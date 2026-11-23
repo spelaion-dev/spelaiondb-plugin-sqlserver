@@ -38,6 +38,29 @@ async fn the_plugin_conforms() {
     assert_conforms(&target).await;
 }
 
+/// Run the protocol conformance suite through an actual Windows LocalDB instance.
+#[cfg(windows)]
+#[tokio::test]
+async fn localdb_plugin_conforms() {
+    let Ok(instance) = std::env::var("SPELAION_TEST_LOCALDB") else {
+        eprintln!("SPELAION_TEST_LOCALDB not set: test skipped");
+        return;
+    };
+    let target = Target {
+        program: PROGRAM.into(),
+        engine: "sqlserver".into(),
+        params: ConnectParams {
+            database: "master".into(),
+            options: [("localdb_instance".into(), instance)].into(),
+            ..Default::default()
+        },
+        one_row: "select 1".into(),
+        refused: "select * from a_table_that_is_not_there".into(),
+        slow: Some("waitfor delay '00:10:00'".into()),
+    };
+    assert_conforms(&target).await;
+}
+
 /// `plugin.toml` is what SpelaionDB's pin says of this plugin: it must be what the program
 /// says of itself. The program says it without a server.
 #[tokio::test]
