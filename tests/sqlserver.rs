@@ -1531,3 +1531,71 @@ async fn a_session_the_server_ended_is_a_connection_error() {
         other => panic!("expected a connection error: {other:?}"),
     }
 }
+
+/// A column of bytes loads every byte as it is into `varbinary`, through a `varbinary(max)`
+/// staging column, the empty bytes and NULL apart; rows of text only into the same table still
+/// load through their own staging table (SDB-464).
+#[tokio::test]
+async fn insert_rows_loads_bytes_as_they_are() {
+    use spelaion_driver_api::{Cell, ColumnKind, InsertTarget, TextRows};
+    let Some(conn) = connect().await else { return };
+    assert!(conn.capabilities().insert_bytes);
+    let table = format!("bytes_{}", std::process::id());
+    exec_all(
+        &*conn,
+        &format!(
+            "if object_id('{table}') is not null drop table {table};\n\
+             create table {table} (id int, data varbinary(max), short varbinary(300))"
+        ),
+    )
+    .await;
+    let every: Vec<u8> = (0..=255).collect();
+    let kinds = [ColumnKind::Text, ColumnKind::Bytes, ColumnKind::Bytes];
+    let mut rows = TextRows::builder_with(&kinds);
+    rows.push_cells([
+        Some(Cell::Text("1")),
+        Some(Cell::Bytes(&every)),
+        Some(Cell::Bytes(&every)),
+    ])
+    .unwrap();
+    rows.push_cells([
+        Some(Cell::Text("2")),
+        Some(Cell::Bytes(&[])),
+        Some(Cell::Bytes(&[])),
+    ])
+    .unwrap();
+    rows.push_cells([Some(Cell::Text("3")), None, None])
+        .unwrap();
+    let target = InsertTarget {
+        schema: "dbo".into(),
+        table: table.clone(),
+        columns: vec!["id".into(), "data".into(), "short".into()],
+    };
+    assert_eq!(conn.insert_rows(&target, rows.finish()).await.unwrap(), 3);
+    // Text only, into the same table: `id` alone.
+    let text = TextRows::from_rows(1, &[vec![Some("4".into())]]).unwrap();
+    let ids = InsertTarget {
+        columns: vec!["id".into()],
+        ..target.clone()
+    };
+    assert_eq!(conn.insert_rows(&ids, text).await.unwrap(), 1);
+    let hex: String = every.iter().map(|b| format!("{b:02X}")).collect();
+    let read = tables(
+        &*conn,
+        &format!(
+            "select id, isnull(convert(varchar(max), data, 2), 'NULL') as d, \
+             isnull(convert(varchar(max), short, 2), 'NULL') as s from {table} order by id"
+        ),
+    )
+    .await;
+    assert_eq!(
+        read[0].1,
+        [
+            vec!["1".to_string(), hex.clone(), hex],
+            vec!["2".into(), String::new(), String::new()],
+            vec!["3".into(), "NULL".into(), "NULL".into()],
+            vec!["4".into(), "NULL".into(), "NULL".into()],
+        ]
+    );
+    exec_all(&*conn, &format!("drop table {table}")).await;
+}

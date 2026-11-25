@@ -22,10 +22,11 @@ use arrow::array::RecordBatch;
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use spelaion_driver_api::{
-    CancelHandle, Capabilities, ConnectParams, Connection, ContextDialect, DatabaseContext, Driver,
-    DriverError, EventStream, ExecEvent, ExecOptions, InsertTarget, KeepAlive, LikeFilter,
-    NameFilter, Notice, ObjectInfo, PlanMode, ReferencingKey, Result, ResultSchema, SchemaColumn,
-    SchemaInfo, SchemaObject, ServerObject, TableInfo, TextRows, TlsMode, TransactionState,
+    CancelHandle, Capabilities, Cell, ColumnKind, ConnectParams, Connection, ContextDialect,
+    DatabaseContext, Driver, DriverError, EventStream, ExecEvent, ExecOptions, InsertTarget,
+    KeepAlive, LikeFilter, NameFilter, Notice, ObjectInfo, PlanMode, ReferencingKey, Result,
+    ResultSchema, SchemaColumn, SchemaInfo, SchemaObject, ServerObject, TableInfo, TextRows,
+    TlsMode, TransactionState,
 };
 use tiberius::{AuthMethod, Client, ColumnType, Config, EncryptionLevel, QueryItem};
 use tokio::net::TcpStream;
@@ -273,6 +274,9 @@ impl Driver for SqlServerDriver {
                 schemas: true,
                 insert_rows: true,
                 bound_params: true,
+                // Staged as `varbinary(max)` (SDB-464). Not said for Babelfish, whose bulk load
+                // of bytes is not tested: a binary column into it stays refused.
+                insert_bytes: explain,
             },
         }))
     }
@@ -566,17 +570,24 @@ pub(crate) async fn after_cancel(client: &mut SqlClient) -> Result<()> {
 /// An import's rows (ADR-038): a TDS bulk load (the protocol's own bulk path) into a temporary
 /// table of `nvarchar(max)` columns, whose names are ours, then one `INSERT … SELECT` that lets
 /// the server convert each value to its column's type, in the order the rows came. The values
-/// are the bulk load's data: they are never SQL text. The staging table lives in the session (and
-/// in its transaction: a rollback drops it, and the next batch creates it again).
+/// are the bulk load's data: they are never SQL text. A column of bytes (a copy's binary column,
+/// SDB-464) is staged as `varbinary(max)`, so its bytes reach the target as they are. The staging
+/// table lives in the session (and in its transaction: a rollback drops it, and the next batch
+/// creates it again); its name says its columns' kinds, so rows of other kinds never share it.
 async fn bulk_insert(client: &mut SqlClient, target: &InsertTarget, rows: TextRows) -> Result<u64> {
     let width = target.columns.len();
-    let staging = format!("#spelaion_import_{width}");
+    let kinds = rows.kinds();
+    let staging = staging_name(width, &kinds);
     let names: Vec<String> = (1..=width).map(|i| format!("c{i}")).collect();
     let create = format!(
         "if object_id('tempdb..{staging}') is null create table {staging}          (spelaion_row bigint identity(1, 1), {})",
         names
             .iter()
-            .map(|n| format!("{n} nvarchar(max) null"))
+            .zip(&kinds)
+            .map(|(n, kind)| match kind {
+                ColumnKind::Text => format!("{n} nvarchar(max) null"),
+                ColumnKind::Bytes => format!("{n} varbinary(max) null"),
+            })
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -589,10 +600,17 @@ async fn bulk_insert(client: &mut SqlClient, target: &InsertTarget, rows: TextRo
             .map_err(|e| map_error(e, None))?;
         for row in 0..rows.len() {
             let mut token = tiberius::TokenRow::new();
-            for value in rows.row(row) {
-                token.push(tiberius::ColumnData::String(
-                    value.map(std::borrow::Cow::Borrowed),
-                ));
+            for (value, kind) in rows.cells(row).zip(&kinds) {
+                token.push(match (kind, value) {
+                    (ColumnKind::Text, None) => tiberius::ColumnData::String(None),
+                    (ColumnKind::Bytes, None) => tiberius::ColumnData::Binary(None),
+                    (_, Some(Cell::Text(text))) => {
+                        tiberius::ColumnData::String(Some(std::borrow::Cow::Borrowed(text)))
+                    }
+                    (_, Some(Cell::Bytes(bytes))) => {
+                        tiberius::ColumnData::Binary(Some(std::borrow::Cow::Borrowed(bytes)))
+                    }
+                });
             }
             load.send(token).await.map_err(|e| map_error(e, None))?;
         }
@@ -611,6 +629,39 @@ async fn bulk_insert(client: &mut SqlClient, target: &InsertTarget, rows: TextRo
         .total();
     run_batch(client, &format!("truncate table {staging}")).await?;
     Ok(inserted)
+}
+
+/// The staging table of rows of `width` columns of these kinds: `#spelaion_import_3` for text
+/// only, as before, and a suffix naming the columns of bytes otherwise (`#spelaion_import_3_b2`),
+/// kept short with a hash past a few of them.
+fn staging_name(width: usize, kinds: &[ColumnKind]) -> String {
+    let bytes: Vec<usize> = kinds
+        .iter()
+        .enumerate()
+        .filter(|(_, kind)| **kind == ColumnKind::Bytes)
+        .map(|(i, _)| i + 1)
+        .collect();
+    match bytes.as_slice() {
+        [] => format!("#spelaion_import_{width}"),
+        few if few.len() <= 4 => format!(
+            "#spelaion_import_{width}_b{}",
+            few.iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join("_")
+        ),
+        many => {
+            // FNV-1a over the positions: the same columns always give the same name.
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for position in many {
+                for byte in position.to_le_bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+            format!("#spelaion_import_{width}_h{hash:016x}")
+        }
+    }
 }
 
 async fn run_batch(client: &mut SqlClient, sql: &str) -> Result<()> {
@@ -1171,5 +1222,22 @@ pub(crate) fn map_error(e: tiberius::error::Error, sql: Option<&str>) -> DriverE
             }
         }
         other => DriverError::Connection(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::{ColumnKind, staging_name};
+
+    #[test]
+    fn rows_of_other_kinds_stage_apart() {
+        use ColumnKind::{Bytes as B, Text as T};
+        assert_eq!(staging_name(3, &[T, T, T]), "#spelaion_import_3");
+        assert_eq!(staging_name(3, &[T, B, T]), "#spelaion_import_3_b2");
+        assert_eq!(staging_name(3, &[B, T, B]), "#spelaion_import_3_b1_3");
+        let many = [B, B, B, B, B, T];
+        assert_eq!(staging_name(6, &many), staging_name(6, &many));
+        assert_ne!(staging_name(6, &many), staging_name(6, &[B, B, B, B, T, B]));
+        assert!(staging_name(6, &many).len() < 116);
     }
 }
