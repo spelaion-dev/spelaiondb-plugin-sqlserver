@@ -64,8 +64,69 @@ async fn values(conn: &dyn Connection, sql: &str) -> Vec<String> {
     out
 }
 
+/// TEMPORARY DIAGNOSTIC (SDB-462): each encryption level through the pipe, with the pipe's
+/// bytes traced. Always fails, so its output shows.
 #[cfg(windows)]
 #[tokio::test]
+async fn diag_tls_through_the_pipe() {
+    use std::process::Command;
+    if Command::new("SqlLocalDB.exe")
+        .arg("versions")
+        .output()
+        .is_err()
+    {
+        return;
+    }
+    let started = Command::new("SqlLocalDB.exe")
+        .args(["start", "MSSQLLocalDB"])
+        .output()
+        .unwrap();
+    eprintln!(
+        "DIAG start: {}",
+        String::from_utf8_lossy(&started.stdout).trim()
+    );
+    let versions = Command::new("SqlLocalDB.exe")
+        .arg("versions")
+        .output()
+        .unwrap();
+    eprintln!(
+        "DIAG versions: {}",
+        String::from_utf8_lossy(&versions.stdout).trim()
+    );
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    // Off, On, Required, Strict.
+    for tls in [
+        TlsMode::Disable,
+        TlsMode::Prefer,
+        TlsMode::Require,
+        TlsMode::VerifyCa,
+    ] {
+        eprintln!("DIAG ===== {tls:?}");
+        let outcome = SqlServerDriver
+            .connect(&ConnectParams {
+                tls,
+                connect_timeout: Some(Duration::from_secs(1)),
+                ..localdb(INSTANCE)
+            })
+            .await;
+        match outcome {
+            Ok(conn) => {
+                let encrypt = values(
+                    &*conn,
+                    "SELECT encrypt_option FROM sys.dm_exec_connections WHERE session_id = @@SPID",
+                )
+                .await;
+                eprintln!("DIAG {tls:?}: connected, encrypt_option {encrypt:?}");
+            }
+            Err(e) => eprintln!("DIAG {tls:?}: {e}"),
+        }
+    }
+    panic!("diagnostic: see the output above");
+}
+
+#[cfg(windows)]
+#[tokio::test]
+#[ignore = "TEMPORARY DIAGNOSTIC (SDB-462): it stops the instance the diagnostic uses"]
 async fn localdb_is_started_and_reached_through_its_pipe() {
     use std::process::Command;
     if Command::new("SqlLocalDB.exe")

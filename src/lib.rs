@@ -107,14 +107,18 @@ fn config(params: &ConnectParams, localdb: bool) -> Result<Config> {
 /// GitHub's Windows runners, with SQL Server 2025's LocalDB). There is no certificate to verify
 /// either, so `verify-ca` and `verify-full` are refused rather than quietly not honoured.
 fn localdb_login(mut config: Config, params: &ConnectParams) -> Result<Config> {
-    match params.tls {
-        TlsMode::Disable | TlsMode::Prefer | TlsMode::Require => {}
-        TlsMode::VerifyCa | TlsMode::VerifyFull => {
+    // TEMPORARY DIAGNOSTIC (SDB-462): each mode tries one encryption level.
+    let level = match params.tls {
+        TlsMode::Disable => EncryptionLevel::Off,
+        TlsMode::Prefer => EncryptionLevel::On,
+        TlsMode::Require => EncryptionLevel::Required,
+        TlsMode::VerifyCa => EncryptionLevel::Strict,
+        TlsMode::VerifyFull => {
             return Err(DriverError::Connection(
                 "a LocalDB instance is reached through its pipe on this machine and has no certificate to verify: leave TLS unset".into(),
             ));
         }
-    }
+    };
     if params.user.is_empty() {
         #[cfg(windows)]
         config.authentication(AuthMethod::Integrated);
@@ -130,7 +134,8 @@ fn localdb_login(mut config: Config, params: &ConnectParams) -> Result<Config> {
             .unwrap_or_default();
         config.authentication(AuthMethod::sql_server(&params.user, password));
     }
-    config.encryption(EncryptionLevel::NotSupported);
+    config.encryption(level);
+    config.trust_cert();
     Ok(config)
 }
 

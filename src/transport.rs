@@ -34,6 +34,18 @@ impl Transport {
     }
 }
 
+/// TEMPORARY DIAGNOSTIC (SDB-462): what crosses the pipe.
+#[cfg(windows)]
+fn trace(what: &str, bytes: &[u8], result: &str) {
+    let head: String = bytes
+        .iter()
+        .take(48)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    eprintln!("PIPE {what} {} bytes {result}: {head}", bytes.len());
+}
+
 impl AsyncRead for Transport {
     fn poll_read(
         self: Pin<&mut Self>,
@@ -43,7 +55,16 @@ impl AsyncRead for Transport {
         match self.get_mut() {
             Transport::Tcp(s) => Pin::new(s).poll_read(cx, buf),
             #[cfg(windows)]
-            Transport::Pipe(s) => Pin::new(s).poll_read(cx, buf),
+            Transport::Pipe(s) => {
+                let before = buf.filled().len();
+                let polled = Pin::new(s).poll_read(cx, buf);
+                match &polled {
+                    Poll::Ready(Ok(())) => trace("read", &buf.filled()[before..], "ok"),
+                    Poll::Ready(Err(e)) => trace("read", &[], &format!("error {e}")),
+                    Poll::Pending => {}
+                }
+                polled
+            }
         }
     }
 }
@@ -57,7 +78,15 @@ impl AsyncWrite for Transport {
         match self.get_mut() {
             Transport::Tcp(s) => Pin::new(s).poll_write(cx, buf),
             #[cfg(windows)]
-            Transport::Pipe(s) => Pin::new(s).poll_write(cx, buf),
+            Transport::Pipe(s) => {
+                let polled = Pin::new(s).poll_write(cx, buf);
+                match &polled {
+                    Poll::Ready(Ok(n)) => trace("write", &buf[..*n], "ok"),
+                    Poll::Ready(Err(e)) => trace("write", buf, &format!("error {e}")),
+                    Poll::Pending => {}
+                }
+                polled
+            }
         }
     }
 
