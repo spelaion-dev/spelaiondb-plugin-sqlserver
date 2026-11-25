@@ -86,8 +86,8 @@ async fn localdb_is_started_and_reached_through_its_pipe() {
         String::from_utf8_lossy(&stopped.stdout).trim()
     );
 
-    // Each TLS setting, as the user may leave it: `disable` sends nothing encrypted (no
-    // password travels), the others encrypt the login.
+    // Each TLS setting, as the user may leave it. None is encrypted: LocalDB offers no TLS on
+    // its pipe (SDB-462, ADR-068's point 5), and with the Windows account no password travels.
     let mut opened = Vec::new();
     for tls in [TlsMode::Prefer, TlsMode::Disable, TlsMode::Require] {
         let outcome = SqlServerDriver
@@ -116,6 +116,19 @@ async fn localdb_is_started_and_reached_through_its_pipe() {
         String::from_utf8_lossy(&info.stdout).trim()
     );
     assert_eq!(opened.len(), 3, "every TLS setting connects");
+    // Unencrypted, as LocalDB has it today. If this fails, a LocalDB release offers TLS on its
+    // pipe: encrypt the login there as over TCP (ADR-068, "What would change this").
+    for conn in &opened {
+        assert_eq!(
+            values(
+                &**conn,
+                "SELECT encrypt_option FROM sys.dm_exec_connections WHERE session_id = @@SPID"
+            )
+            .await,
+            ["FALSE"],
+            "LocalDB now encrypts its pipe"
+        );
+    }
     let conn = opened.remove(0);
     assert_eq!(
         values(&*conn, "SELECT CAST(SERVERPROPERTY('IsLocalDB') AS int)").await,

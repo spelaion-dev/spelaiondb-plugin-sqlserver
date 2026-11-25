@@ -102,10 +102,14 @@ fn config(params: &ConnectParams, localdb: bool) -> Result<Config> {
 /// The login to a LocalDB instance (SDB-312, ADR-068). With no user, the Windows account that
 /// owns the instance logs in as it is (SSPI); a SQL login may log in too if the instance has one.
 ///
-/// Nothing is encrypted with TLS: the pipe is communication within this machine, which another
-/// user's process cannot read, and LocalDB closes it when tiberius starts TLS inside it (seen on
-/// GitHub's Windows runners, with SQL Server 2025's LocalDB). There is no certificate to verify
-/// either, so `verify-ca` and `verify-full` are refused rather than quietly not honoured.
+/// Nothing is encrypted with TLS, because LocalDB offers none: it answers every PRELOGIN through
+/// its pipe with `ENCRYPT_NOT_SUP` and loads no certificate (SDB-462, traced on GitHub's Windows
+/// runners with SQL Server 2025's LocalDB). Asking for encryption is refused by tiberius, and a
+/// handshake started anyway (login-only `Off`, TDS 8's strict mode) makes LocalDB close the pipe.
+/// The pipe is communication within this machine, which another user's process cannot read.
+/// There is no certificate to verify either, so `verify-ca` and `verify-full` are refused rather
+/// than quietly not honoured. `tests/localdb.rs` checks that the session is unencrypted, so a
+/// LocalDB that starts offering TLS shows.
 fn localdb_login(mut config: Config, params: &ConnectParams) -> Result<Config> {
     match params.tls {
         TlsMode::Disable | TlsMode::Prefer | TlsMode::Require => {}
