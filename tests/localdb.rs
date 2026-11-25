@@ -94,6 +94,37 @@ async fn diag_tls_through_the_pipe() {
         String::from_utf8_lossy(&versions.stdout).trim()
     );
     tokio::time::sleep(Duration::from_secs(10)).await;
+    let folder = std::path::PathBuf::from(std::env::var("LOCALAPPDATA").unwrap())
+        .join("Microsoft\\Microsoft SQL Server Local DB\\Instances\\MSSQLLocalDB");
+    match std::fs::read(folder.join("error.log")) {
+        Ok(bytes) => {
+            // The error log is UTF-16.
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            let text = String::from_utf16_lossy(&units);
+            eprintln!("DIAG error.log: {} lines", text.lines().count());
+            for line in text.lines().filter(|l| {
+                let l = l.to_lowercase();
+                [
+                    "certif",
+                    "encrypt",
+                    "ssl",
+                    "tls",
+                    "accept connection",
+                    "protocol",
+                    "sni",
+                    "network",
+                ]
+                .iter()
+                .any(|w| l.contains(w))
+            }) {
+                eprintln!("DIAG error.log: {}", line.trim());
+            }
+        }
+        Err(e) => eprintln!("DIAG error.log: {e}"),
+    }
     // Off, On, Required, Strict.
     for tls in [
         TlsMode::Disable,
