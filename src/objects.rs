@@ -324,7 +324,10 @@ pub async fn object_definition(
         SchemaObjectKind::Aggregate
         | SchemaObjectKind::Enum
         | SchemaObjectKind::Domain
-        | SchemaObjectKind::Event => Err(DriverError::Other(format!(
+        | SchemaObjectKind::Event
+        | SchemaObjectKind::Sink
+        | SchemaObjectKind::Connection
+        | SchemaObjectKind::Secret => Err(DriverError::Other(format!(
             "SQL Server has no {:?} objects",
             object.kind
         ))),
