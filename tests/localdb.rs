@@ -130,7 +130,11 @@ async fn diag_tls_through_the_pipe() {
                      INSERT #l EXEC xp_readerrorlog 0, 1, N'ncrypt';
                      INSERT #l EXEC xp_readerrorlog 0, 1, N'SSL';
                      INSERT #l EXEC xp_readerrorlog 0, 1, N'TLS';
-                     INSERT #l EXEC xp_readerrorlog 0, 1, N'listening';
+                     INSERT #l EXEC xp_readerrorlog 0, 1, N'accept connection';
+                     INSERT #l EXEC xp_readerrorlog 0, 1, N'Microsoft SQL Server';
+                     CREATE TABLE #all (d datetime, p nvarchar(100), t nvarchar(4000));
+                     INSERT #all EXEC xp_readerrorlog 0, 1;
+                     INSERT #l SELECT NULL, NULL, CONCAT(N'lines in the error log: ', COUNT(*)) FROM #all;
                      SELECT t FROM #l ORDER BY d",
                 )
                 .await;
