@@ -100,8 +100,10 @@ async fn diag_tls_through_the_pipe() {
         Ok(bytes) => {
             // The error log is UTF-16.
             let units: Vec<u16> = bytes
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c))
                 .collect();
             let text = String::from_utf16_lossy(&units);
             eprintln!("DIAG error.log: {} lines", text.lines().count());
