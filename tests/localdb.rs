@@ -117,6 +117,26 @@ async fn diag_tls_through_the_pipe() {
                 )
                 .await;
                 eprintln!("DIAG {tls:?}: connected, encrypt_option {encrypt:?}");
+                let transport = values(
+                    &*conn,
+                    "SELECT net_transport + N' / ' + protocol_type + N' / ' + auth_scheme FROM sys.dm_exec_connections WHERE session_id = @@SPID",
+                )
+                .await;
+                eprintln!("DIAG {tls:?}: transport {transport:?}");
+                let log = values(
+                    &*conn,
+                    "CREATE TABLE #l (d datetime, p nvarchar(100), t nvarchar(4000));
+                     INSERT #l EXEC xp_readerrorlog 0, 1, N'ertificate';
+                     INSERT #l EXEC xp_readerrorlog 0, 1, N'ncrypt';
+                     INSERT #l EXEC xp_readerrorlog 0, 1, N'SSL';
+                     INSERT #l EXEC xp_readerrorlog 0, 1, N'TLS';
+                     INSERT #l EXEC xp_readerrorlog 0, 1, N'listening';
+                     SELECT t FROM #l ORDER BY d",
+                )
+                .await;
+                for line in log {
+                    eprintln!("DIAG errorlog: {line}");
+                }
             }
             Err(e) => eprintln!("DIAG {tls:?}: {e}"),
         }

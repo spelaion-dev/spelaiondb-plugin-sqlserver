@@ -109,7 +109,7 @@ fn config(params: &ConnectParams, localdb: bool) -> Result<Config> {
 fn localdb_login(mut config: Config, params: &ConnectParams) -> Result<Config> {
     // TEMPORARY DIAGNOSTIC (SDB-462): each mode tries one encryption level.
     let level = match params.tls {
-        TlsMode::Disable => EncryptionLevel::Off,
+        TlsMode::Disable => EncryptionLevel::NotSupported,
         TlsMode::Prefer => EncryptionLevel::On,
         TlsMode::Require => EncryptionLevel::Required,
         TlsMode::VerifyCa => EncryptionLevel::Strict,
