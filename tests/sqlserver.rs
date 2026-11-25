@@ -1420,6 +1420,106 @@ async fn keep_alive_pauses_after_a_dropped_batch_with_a_transaction() {
     run(&*conn, "rollback").await.unwrap();
 }
 
+/// A cancelled batch that began or ended a transaction before it was stopped (SDB-458): the
+/// response the cancel drops carries the transaction's ENVCHANGE. The session must not keep
+/// the old TDS transaction descriptor, which SQL Server refuses with error 3989 on every
+/// request: the next query runs with the transaction state reported as the server has it.
+#[tokio::test]
+async fn a_cancel_after_begin_or_commit_keeps_the_transaction_descriptor() {
+    use spelaion_driver_api::{KeepAlive, TransactionState};
+    let Some(conn) = connect().await else { return };
+    let Some(observer) = connect().await else {
+        return;
+    };
+    let spid: u32 = tables(&*conn, "select @@spid").await[0].1[0][0]
+        .parse()
+        .unwrap();
+
+    // Begun before the wait: the transaction stays open after the cancel.
+    let events = conn
+        .execute(
+            "begin transaction; waitfor delay '00:00:05'",
+            &ExecOptions::default(),
+        )
+        .await
+        .unwrap();
+    wait_for_waitfor(&*observer, spid).await;
+    conn.cancel_handle().cancel().await.unwrap();
+    let result = finish(events, "begin, then wait").await;
+    assert!(matches!(result, Err(DriverError::Cancelled)), "{result:?}");
+    assert_eq!(
+        tables(&*conn, "select @@trancount as n").await[0].1,
+        [["1"]]
+    );
+    assert_eq!(
+        conn.transaction_state().await.unwrap(),
+        TransactionState::Open
+    );
+    assert_eq!(conn.keep_alive().await.unwrap(), KeepAlive::InTransaction);
+
+    // Ended before the wait: no transaction is left, and none is reported.
+    let events = conn
+        .execute("commit; waitfor delay '00:00:05'", &ExecOptions::default())
+        .await
+        .unwrap();
+    wait_for_waitfor(&*observer, spid).await;
+    conn.cancel_handle().cancel().await.unwrap();
+    let result = finish(events, "commit, then wait").await;
+    assert!(matches!(result, Err(DriverError::Cancelled)), "{result:?}");
+    assert_eq!(
+        tables(&*conn, "select @@trancount as n").await[0].1,
+        [["0"]]
+    );
+    assert_eq!(
+        conn.transaction_state().await.unwrap(),
+        TransactionState::Idle
+    );
+    assert_eq!(conn.keep_alive().await.unwrap(), KeepAlive::Alive);
+
+    // The batches as written in SDB-458, cancelled around the moment each ends: whatever the
+    // cancel stops, the next query runs (or the session is reported lost), never error 3989.
+    for (setup, batch) in [
+        (None, "begin transaction; waitfor delay '00:00:01'"),
+        (
+            Some("begin transaction"),
+            "waitfor delay '00:00:01'; commit",
+        ),
+    ] {
+        for wait_ms in [900, 950, 980, 1000, 1020, 1050, 1100] {
+            if let Some(setup) = setup {
+                run(&*conn, setup).await.unwrap();
+            }
+            let events = conn.execute(batch, &ExecOptions::default()).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+            conn.cancel_handle().cancel().await.unwrap();
+            let _ = finish(events, batch).await;
+            match run(&*conn, "select @@trancount as n").await {
+                Ok(_) => {}
+                Err(DriverError::Connection(_)) => return,
+                Err(e) => panic!("{batch}, cancelled after {wait_ms} ms: {e:?}"),
+            }
+            let open = tables(&*conn, "select @@trancount as n").await[0].1[0][0] != "0";
+            let state = conn.transaction_state().await.unwrap();
+            assert_eq!(
+                state,
+                if open {
+                    TransactionState::Open
+                } else {
+                    TransactionState::Idle
+                },
+                "{batch}, cancelled after {wait_ms} ms"
+            );
+            if open {
+                run(&*conn, "rollback").await.unwrap();
+            }
+            assert_eq!(
+                conn.transaction_state().await.unwrap(),
+                TransactionState::Idle
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_session_the_server_ended_is_a_connection_error() {
     let Some(conn) = connect().await else { return };

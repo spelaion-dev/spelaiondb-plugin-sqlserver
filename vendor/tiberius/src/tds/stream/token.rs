@@ -240,6 +240,32 @@ where
         }
     }
 
+    /// SpelaionDB patch (SDB-458): reads the rest of a cancelled response, dropped between two
+    /// tokens, as tokens, so its ENVCHANGE tokens move the transaction descriptor. True if the
+    /// response ended with the Attention's acknowledgement, false if it ended without it (SQL
+    /// Server then acknowledges in a message of its own). The server's errors in it are the
+    /// cancelled batch's and are not returned.
+    pub(crate) async fn drain_cancelled(self) -> crate::Result<bool> {
+        let mut stream = self.try_unfold();
+
+        loop {
+            match stream.try_next().await {
+                Ok(Some(ReceivedToken::Done(token)))
+                | Ok(Some(ReceivedToken::DoneProc(token)))
+                | Ok(Some(ReceivedToken::DoneInProc(token)))
+                    if token.is_attention() =>
+                {
+                    return Ok(true);
+                }
+                Ok(Some(_)) => (),
+                Ok(None) => return Ok(false),
+                // At the end of the response, the first ERROR token it carried.
+                Err(Error::Server(_)) => return Ok(false),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
     #[cfg(any(windows, feature = "integrated-auth-gssapi", feature = "sspi-rs"))]
     pub(crate) async fn flush_sspi(self) -> crate::Result<TokenSspi> {
         let mut stream = self.try_unfold();
@@ -484,6 +510,9 @@ where
             }
 
             let ty_byte = this.conn.read_u8().await?;
+            // SpelaionDB patch (SDB-458): from here until the token is decoded, a dropped stream
+            // cannot be read on as tokens.
+            this.conn.set_mid_token(true);
 
             let ty = TokenType::try_from(ty_byte)
                 .map_err(|_| Error::Protocol(format!("invalid token type {:x}", ty_byte).into()))?;
@@ -516,6 +545,7 @@ where
                 // rather than silently falling through. Unknown token *bytes*
                 // are already rejected by the `TokenType::try_from` above.
             };
+            this.conn.set_mid_token(false);
 
             Ok(Some((token, this)))
         });
@@ -969,6 +999,88 @@ mod tests {
             "with no command timeout the read should stay pending on the stalled server"
         );
     }
+
+    // --- SpelaionDB patch (SDB-458): a cancel keeps the transaction descriptor ----
+
+    const DESC: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+    const DONE_ERROR: u16 = 1 << 1;
+    const DONE_ATTN: u16 = 1 << 5;
+
+    // ENVCHANGE BeginTransaction (8): the new descriptor, no old one.
+    fn envchange_begin(desc: [u8; 8]) -> Vec<u8> {
+        let mut body = vec![8u8, 8];
+        body.extend_from_slice(&desc);
+        body.push(0);
+        let mut v = vec![0xE3u8];
+        v.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        v.extend_from_slice(&body);
+        v
+    }
+
+    // ENVCHANGE CommitTransaction (9): no new descriptor, the old one.
+    fn envchange_commit(old: [u8; 8]) -> Vec<u8> {
+        let mut body = vec![9u8, 0, 8];
+        body.extend_from_slice(&old);
+        let mut v = vec![0xE3u8];
+        v.extend_from_slice(&(body.len() as u16).to_le_bytes());
+        v.extend_from_slice(&body);
+        v
+    }
+
+    // What the server sends after the cancel: the rest of the cancelled response, ended by a
+    // DONE with the error bit, then the Attention's acknowledgement in a message of its own.
+    fn rest_then_ack(rest: &[u8]) -> Vec<u8> {
+        let mut cancelled = rest.to_vec();
+        cancelled.extend_from_slice(&done_token(DONE_ERROR, 0, 0));
+        let mut wire = packet_bytes(&cancelled);
+        wire.extend_from_slice(&packet_bytes(&done_token(DONE_ATTN, 0, 0)));
+        wire
+    }
+
+    #[tokio::test]
+    async fn a_cancel_between_tokens_keeps_a_begin_transaction() {
+        let mut conn = Connection::test_over(
+            MockStream::new(rest_then_ack(&envchange_begin(DESC))),
+            false,
+        );
+        conn.cancel_request().await.unwrap();
+        assert_eq!(conn.context().transaction_descriptor(), DESC);
+        assert!(!conn.descriptor_unknown());
+    }
+
+    #[tokio::test]
+    async fn a_cancel_between_tokens_keeps_a_commit() {
+        let mut conn = Connection::test_over(
+            MockStream::new(rest_then_ack(&envchange_commit(DESC))),
+            false,
+        );
+        conn.context_mut().set_transaction_descriptor(DESC);
+        conn.cancel_request().await.unwrap();
+        assert_eq!(conn.context().transaction_descriptor(), [0; 8]);
+        assert!(!conn.descriptor_unknown());
+    }
+
+    #[tokio::test]
+    async fn a_cancel_between_tokens_takes_an_acknowledgement_in_the_same_message() {
+        let mut payload = envchange_begin(DESC);
+        payload.extend_from_slice(&error_token(3621, "cancelled", "srv", "", 1));
+        payload.extend_from_slice(&done_token(DONE_ERROR | DONE_ATTN, 0, 0));
+        let mut conn = Connection::test_over(MockStream::new(packet_bytes(&payload)), false);
+        conn.cancel_request().await.unwrap();
+        assert_eq!(conn.context().transaction_descriptor(), DESC);
+    }
+
+    #[tokio::test]
+    async fn a_cancel_inside_a_token_says_the_descriptor_is_unknown() {
+        let mut conn = Connection::test_over(
+            MockStream::new(rest_then_ack(&envchange_begin(DESC))),
+            false,
+        );
+        conn.set_mid_token(true);
+        conn.cancel_request().await.unwrap();
+        assert_eq!(conn.context().transaction_descriptor(), [0; 8]);
+        assert!(conn.descriptor_unknown());
+    }
 }
 
 // Server-free tests for the `RoundTripTimeout` stream combinator that backs
@@ -1171,4 +1283,5 @@ mod round_trip_timeout_tests {
             .expect_err("a zero bound must trip on the first stall");
         assert!(is_timed_out(&err), "expected TimedOut, got: {err:?}");
     }
+
 }

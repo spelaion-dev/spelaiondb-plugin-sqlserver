@@ -83,6 +83,15 @@ where
     ///
     /// [`ensure_not_poisoned`]: Self::ensure_not_poisoned
     command_desync: Arc<AtomicBool>,
+    /// SpelaionDB patch (SDB-458): whether the token stream is in the middle of a token: its
+    /// type byte was read and the rest not yet. A response dropped between tokens can still be
+    /// read as tokens after a cancel (and its transaction ENVCHANGE kept); one dropped inside a
+    /// token cannot.
+    mid_token: bool,
+    /// SpelaionDB patch (SDB-458): a cancelled response was drained without being read as
+    /// tokens, so a transaction ENVCHANGE in it may have been lost and the transaction
+    /// descriptor may be stale. Cleared by the next request.
+    descriptor_unknown: bool,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Debug for Connection<S> {
@@ -175,6 +184,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             buf: BytesMut::new(),
             poisoned: false,
             command_desync: Arc::new(AtomicBool::new(false)),
+            mid_token: false,
+            descriptor_unknown: false,
         };
 
         let fed_auth_required = matches!(config.auth, AuthMethod::AADToken(_));
@@ -277,6 +288,9 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     {
         self.ensure_not_poisoned()?;
         self.flushed = false;
+        // SpelaionDB patch (SDB-458): a new response starts at a token boundary.
+        self.mid_token = false;
+        self.descriptor_unknown = false;
         let packet_size = (self.context.packet_size() as usize) - HEADER_BYTES;
 
         let mut payload = BytesMut::new();
@@ -336,6 +350,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
     /// mid-response. See the `command_desync` field.
     pub(crate) fn command_desync_flag(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.command_desync)
+    }
+
+    /// SpelaionDB patch (SDB-458): the token stream says when it is inside a token.
+    pub(crate) fn set_mid_token(&mut self, mid_token: bool) {
+        self.mid_token = mid_token;
+    }
+
+    /// SpelaionDB patch (SDB-458): whether the last cancel drained a response without reading
+    /// it as tokens, so the transaction descriptor may be stale until a request proves it.
+    pub(crate) fn descriptor_unknown(&self) -> bool {
+        self.descriptor_unknown
     }
 
     /// Marks the connection poisoned for the duration of a multi-packet write.
@@ -447,6 +472,10 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         // to the cancelled request was read to its end, before the write below
         // resets the flag.
         let response_done = self.flushed;
+        // SpelaionDB patch (SDB-458): whether every byte of it was read as tokens, and, if
+        // not, whether what is left starts at a token boundary.
+        let response_read = self.is_eof();
+        let resumable = !self.mid_token;
 
         let id = self.context.next_packet_id();
         let header = PacketHeader::attention(id);
@@ -462,9 +491,31 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         self.flush_sink().await?;
         self.poisoned = false;
 
+        // SpelaionDB patch (SDB-458): dropped between tokens, the rest of the cancelled
+        // response is read as tokens, so a transaction ENVCHANGE in it (a `BEGIN TRAN`,
+        // `COMMIT` or `ROLLBACK` the server already ran) moves the transaction descriptor.
+        // Left stale, SQL Server refuses every later request with error 3989.
+        if !response_read && resumable {
+            match TokenStream::new(self).drain_cancelled().await {
+                Ok(true) => return Ok(TokenDone::default()),
+                Ok(false) => {}
+                Err(e) => {
+                    self.poisoned = true;
+                    return Err(e);
+                }
+            }
+            self.flushed = false;
+            return TokenStream::new(self).flush_done_attention().await;
+        }
         // SpelunkDB patch: the cancelled response may have been dropped in the
         // middle of a token. Its partial packet is discarded and the rest of its
         // message drained on packet boundaries (it ends early, with a DONE).
+        // SpelaionDB patch (SDB-458): a transaction ENVCHANGE in what is drained is lost, so
+        // the descriptor may be stale: the caller is told (`Client::transaction_descriptor_
+        // unknown`).
+        if !response_read {
+            self.descriptor_unknown = true;
+        }
         self.buf.truncate(0);
         if !response_done {
             loop {
@@ -930,6 +981,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                     buf: BytesMut::new(),
                     poisoned: false,
                     command_desync,
+                    mid_token: false,
+                    descriptor_unknown: false,
                 })
             }
         }
@@ -976,6 +1029,8 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             buf: BytesMut::new(),
             poisoned,
             command_desync: Arc::new(AtomicBool::new(false)),
+            mid_token: false,
+            descriptor_unknown: false,
         }
     }
 }

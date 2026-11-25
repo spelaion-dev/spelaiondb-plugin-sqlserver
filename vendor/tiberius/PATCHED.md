@@ -24,6 +24,32 @@ the previous query's.
 `crates/spelaion-driver-sqlserver/tests/sqlserver.rs` checks a cancel while waiting and while
 rows stream, and that later queries get their own results.
 
+### And the transaction descriptor after a cancel (SDB-458)
+
+Draining on packet boundaries skips every token left in the cancelled response, and with them a
+transaction ENVCHANGE: a `BEGIN TRAN`, `COMMIT` or `ROLLBACK` the server ran before the
+Attention. The client then kept the old TDS transaction descriptor, and SQL Server refused every
+later request with error 3989 ("New request is not allowed to start because it should come with
+valid transaction descriptor"), the one that would have ended the transaction included.
+
+- The token stream (`src/tds/stream/token.rs`, `try_unfold`) marks the connection while it is
+  inside a token (`Connection::set_mid_token`): from its type byte until it is decoded.
+- `cancel_request` reads a response dropped *between* tokens on as tokens
+  (`TokenStream::drain_cancelled`), so its ENVCHANGE tokens move the descriptor; a cancel
+  while the server is still working (a `WAITFOR`) is always this case.
+- A response dropped *inside* a token (rows streaming) can only be drained, as before. The
+  connection then says the descriptor may be stale (`Client::transaction_descriptor_unknown`,
+  until the next request), and the plugin proves it with one query, closing the session if
+  the server refuses it.
+
+The plugin's `tests/sqlserver.rs` (`a_cancel_after_begin_or_commit_keeps_the_transaction_
+descriptor`) cancels both kinds of batch against a real server. The unit tests at the end of
+`token.rs`'s `tests` module (`a_cancel_…`) feed both cases canned bytes. They are not run by this
+workspace (tiberius is not a member, and its dev-dependencies are many): run them from a copy of
+this folder with `[workspace]` added to its manifest and `cargo test --lib --no-default-features
+--features tds80,rustls,winauth` (the TLS certificate tests there fail without upstream's
+`docker/certs`, which this copy does not keep).
+
 To upgrade: take the new release, re-apply the change if upstream has not fixed it (or drop
 this folder and the `[patch.crates-io]` entry if it has), and run those tests.
 

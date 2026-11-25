@@ -725,6 +725,17 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         Ok(())
     }
 
+    /// Whether the last [`cancel_query`] had to drain the cancelled response without reading
+    /// it as tokens (it was dropped in the middle of one), so a transaction ENVCHANGE in it may
+    /// have been lost and the transaction descriptor the next request carries may be stale
+    /// (SpelaionDB patch, SDB-458). SQL Server refuses a request with a stale descriptor with
+    /// error 3989. Cleared by the next request.
+    ///
+    /// [`cancel_query`]: #method.cancel_query
+    pub fn transaction_descriptor_unknown(&self) -> bool {
+        self.connection.descriptor_unknown()
+    }
+
     /// Closes this database connection explicitly.
     pub async fn close(self) -> crate::Result<()> {
         self.connection.close().await
