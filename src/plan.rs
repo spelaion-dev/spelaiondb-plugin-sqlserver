@@ -10,7 +10,7 @@ use spelaion_driver_api::{DriverError, ExecEvent, PlanMode, Result, ResultSchema
 use tiberius::{ColumnType, QueryItem};
 use tokio::sync::{mpsc, watch};
 
-use super::{SqlClient, decode, info_notices, map_error, rows, run_batch};
+use super::{SqlClient, after_cancel, decode, info_notices, map_error, rows, run_batch};
 
 const COLUMN: &str = "Microsoft SQL Server 2005 XML Showplan";
 // The core enforces the same limit for plans opened from a file or another driver.
@@ -55,10 +55,11 @@ async fn wait<T>(
     }
 }
 
-/// Attention drains the interrupted batch before another batch can be sent.
+/// Attention drains the interrupted batch before another batch can be sent, and the session's
+/// transaction descriptor is still one the server accepts (SDB-458).
 async fn interrupt(client: &mut SqlClient) -> bool {
     matches!(
-        tokio::time::timeout(CLEANUP_TIMEOUT, client.cancel_query()).await,
+        tokio::time::timeout(CLEANUP_TIMEOUT, after_cancel(client)).await,
         Ok(Ok(()))
     )
 }

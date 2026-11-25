@@ -413,14 +413,19 @@ async fn actor(
                         return;
                     }
                     // The batch's stream is dropped: the Attention stops it on the server and
-                    // drains what was left, so the session goes on.
-                    let result = client.cancel_query().await;
-                    let _ = events
-                        .send(Err(match result {
-                            Ok(()) => DriverError::Cancelled,
-                            Err(e) => map_error(e, None),
-                        }))
-                        .await;
+                    // reads what was left, so the session goes on.
+                    match after_cancel(&mut client).await {
+                        Ok(()) => {
+                            let _ = events.send(Err(DriverError::Cancelled)).await;
+                        }
+                        // SDB-458: a session that would fail every request is closed instead,
+                        // so it is reported lost. Nothing runs on it again (ADR-028).
+                        Err(error) => {
+                            let _ = events.send(Err(error)).await;
+                            requests.close();
+                            break;
+                        }
+                    }
                 }
             }
             Request::Rows { sql, params, reply } => {
@@ -528,6 +533,30 @@ async fn actor(
         }
     }
     let _ = client.close().await;
+}
+
+/// Said when a cancel leaves a session whose transaction descriptor cannot be known.
+const DESCRIPTOR_LOST: &str = "the session was closed after the cancel: the server's \
+     transaction state could not be read back, and every later request would have been refused";
+
+/// The Attention after a dropped batch (SDB-458). The patched tiberius reads the rest of the
+/// cancelled response as tokens, so a `BEGIN TRAN`, `COMMIT` or `ROLLBACK` the server ran before
+/// the cancel moves the TDS transaction descriptor. Where the response was dropped inside a token
+/// it could only be drained, and the descriptor may be stale: one request proves it, since SQL
+/// Server refuses a stale one (error 3989). A cancel that fails, or a descriptor proved stale,
+/// is a connection error: the session cannot go on.
+pub(crate) async fn after_cancel(client: &mut SqlClient) -> Result<()> {
+    if let Err(error) = client.cancel_query().await {
+        return Err(DriverError::Connection(format!(
+            "the session was closed: the cancel could not be completed ({error})"
+        )));
+    }
+    if client.transaction_descriptor_unknown()
+        && rows(client, "select xact_state()", &[]).await.is_err()
+    {
+        return Err(DriverError::Connection(DESCRIPTOR_LOST.into()));
+    }
+    Ok(())
 }
 
 /// An import's rows (ADR-038): a TDS bulk load (the protocol's own bulk path) into a temporary
